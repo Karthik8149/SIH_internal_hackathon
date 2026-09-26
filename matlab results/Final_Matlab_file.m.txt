@@ -1,0 +1,912 @@
+%% SIH26058 - SOURCE-GROUNDED 4D ADAPTIVE SONAR LUT
+% ========================================================================
+% Inputs:
+%   V_Turbidity, V_Salinity, V_Depth, V_Temperature : 0-5 V
+%
+% Pipeline:
+%
+%   0-5 V sensors
+%       |
+%       +--> Temperature [deg C]
+%       +--> Salinity    [ppt]
+%       +--> Depth       [m]
+%       +--> Turbidity   [NTU]
+%                    |
+%                    v
+%          Mackenzie sound speed c(T,S,D)
+%                    |
+%          Francois-Garrison water
+%          absorption alpha_w(f,T,S,D,pH)
+%                    |
+%          Turbidity -> SSC calibration
+%                    |
+%          Urick/USGS sediment attenuation
+%          alpha_s(f,SSC,particle size)
+%                    |
+%          spreading + absorption/attenuation
+%                    |
+%          C1/C2/C3/C4/C5 mode feasibility
+%                    |
+%          choose HIGHEST usable frequency
+%
+% IMPORTANT:
+% 1) Mackenzie does NOT determine frequency. It determines sound speed.
+% 2) Francois-Garrison determines seawater absorption versus f,T,S,D,pH.
+% 3) Turbidity is NOT directly an acoustic attenuation coefficient.
+%    It must be calibrated to suspended-sediment concentration (SSC).
+% 4) SSC attenuation also depends on particle size/type. A representative
+%    particle radius is therefore exposed below as a prototype parameter.
+% 5) The C1-C5 frequencies/bandwidths/pulses/amplitudes are YOUR design
+%    modes. Literature does not prescribe these five exact modes.
+% 6) The selection boundary is a LINK-BUDGET criterion: choose the highest
+%    frequency whose calculated propagation loss does not exceed the
+%    baseline C3 link budget. This gives a reproducible, source-grounded
+%    LUT without inventing arbitrary environmental severity weights.
+%
+% SOURCE BASIS
+% ------------------------------------------------------------------------
+% Mackenzie, K.V. (1981), JASA 70(3), 807-812.
+% DOI: 10.1121/1.386920
+%
+% Francois, R.E. & Garrison, G.R. (1982), JASA 72.
+% Part I DOI: 10.1121/1.388170
+% Part II DOI: 10.1121/1.388673
+%
+% Topping et al. / USGS sediment acoustics:
+% Urick-based sediment attenuation depends on SSC, particle size and
+% acoustic frequency.
+%
+% Macaulay, Chu & Ona (2020), JASA 148, 100-107.
+% DOI: 10.1121/10.0001498
+% Field absorption measurements from 38-360 kHz; below ~200 kHz they were
+% consistent with existing equations, while around 333 kHz measurements
+% were about 15 dB/km higher than existing-formula estimates.
+%
+% NPL seawater absorption guide:
+% Francois-Garrison reliability limits are explicitly environment/frequency
+% dependent. See validity flags below.
+%
+% MathWorks:
+% Underwater channel examples use frequency-dependent absorption and
+% image-method multipath; this script uses the environmental loss terms
+% needed for the LUT, not a full Bellhop channel.
+%
+% ------------------------------------------------------------------------
+% PROTOTYPE PARAMETERS THAT MUST EVENTUALLY BE CALIBRATED
+% ------------------------------------------------------------------------
+% A) turbidity -> SSC:
+%       SSC_mgL = SSC_per_NTU * turbidity_NTU + SSC_offset
+%
+% USGS explicitly recommends calibration of turbidity against measured SSC;
+% there is no universal NTU -> mg/L conversion.
+%
+% B) sediment radius:
+%       representative particle radius used by the Urick-type model.
+% This should eventually come from site/sample particle-size data.
+%
+% C) range:
+%       source/target separation, NOT the operating depth.
+%
+% D) baseline link budget:
+%       calculated from the baseline C3 condition.
+%
+% ========================================================================
+
+clear;
+clc;
+
+%% ========================================================================
+% 1. SENSOR VOLTAGE -> PHYSICAL-RANGE MAPPING
+% ========================================================================
+
+Vmin = 0;
+Vmax = 5;
+
+% Mackenzie validity range
+Tmin = -2;       % deg C
+Tmax = 30;       % deg C
+
+Smin = 30;       % ppt
+Smax = 40;       % ppt
+
+Dmin = 0;        % m
+Dmax = 8000;     % m
+
+% Prototype turbidity-sensor range.
+% REPLACE with actual sensor calibration.
+TurbMin_NTU = 0;
+TurbMax_NTU = 1000;
+
+%% ========================================================================
+% 2. YOUR C1-C5 OPERATING MODES
+% ========================================================================
+
+Mode = ["C1";"C2";"C3";"C4";"C5"];
+
+ModeDescription = [
+    "Deep / Highly Turbid"
+    "Moderate"
+    "Baseline"
+    "Shallow / Clear"
+    "Surface / Crystal Clear"
+];
+
+Fc_kHz = [50;100;200;350;500];
+
+Bandwidth_kHz = [10;20;40;70;100];
+
+Pulse_ms = [5.0;4.0;2.0;1.0;0.5];
+
+AmplitudeClass = [
+    "High"
+    "Med-High"
+    "Medium"
+    "Low"
+    "Minimum"
+];
+
+ModeTable = table( ...
+    Mode, ...
+    ModeDescription, ...
+    Fc_kHz, ...
+    Bandwidth_kHz, ...
+    Pulse_ms, ...
+    AmplitudeClass);
+
+%% ========================================================================
+% 3. SONAR / WATERWAY PARAMETERS
+% ========================================================================
+%
+% RANGE IS NOT DEPTH.
+% It is the source-to-target separation used in the propagation-loss
+% calculation.
+%
+% Set this to your intended operating range.
+
+range_m = 100;
+
+% One-way or two-way path.
+% Active sonar echo detection is normally two-way.
+% Set to 1 for a one-way acoustic link.
+propagation_hops = 2;
+
+pH = 8.1;
+
+%% ========================================================================
+% 4. TURBIDITY -> SSC CALIBRATION
+% ========================================================================
+%
+% DO NOT PRESENT THIS AS A UNIVERSAL OCEAN RELATIONSHIP.
+%
+% USGS documents site-specific calibration between turbidity and SSC.
+%
+% This is only a prototype placeholder so the MATLAB model runs.
+% Replace these with calibration values obtained from your turbidity
+% sensor and water samples.
+
+SSC_per_NTU = 1.0;       % mg/L per NTU -- PROTOTYPE ONLY
+SSC_offset_mgL = 0.0;    % mg/L
+
+% Representative sediment properties.
+% These are PROTOTYPE values and must eventually be calibrated.
+sediment_density_kgm3 = 2650;
+water_density_kgm3 = 1025;
+
+% Representative particle radius.
+% 10 micrometers = fine suspended material / silt-scale prototype.
+particle_radius_um = 10;
+
+%% ========================================================================
+% 5. SENSOR VOLTAGE INPUTS
+% ========================================================================
+%
+% Columns:
+% [V_Temperature  V_Salinity  V_Depth  V_Turbidity]
+%
+% Replace this matrix with your real sensor voltages.
+
+sensorVoltage = [
+    0.5  2.5  4.8  4.9
+    1.5  2.8  3.5  3.5
+    2.5  2.5  1.9  2.0
+    3.5  2.2  0.6  0.6
+    4.5  2.0  0.05 0.05
+];
+
+if any(sensorVoltage(:) < 0 | sensorVoltage(:) > 5)
+    error('All sensor voltages must be in the range 0-5 V.');
+end
+
+N = size(sensorVoltage,1);
+
+%% ========================================================================
+% 6. MAP VOLTAGES TO PHYSICAL VALUES
+% ========================================================================
+
+V_T = sensorVoltage(:,1);
+V_S = sensorVoltage(:,2);
+V_D = sensorVoltage(:,3);
+V_Tu = sensorVoltage(:,4);
+
+T_C = mapVoltage(V_T,Vmin,Vmax,Tmin,Tmax);
+
+S_ppt = mapVoltage(V_S,Vmin,Vmax,Smin,Smax);
+
+Depth_m = mapVoltage(V_D,Vmin,Vmax,Dmin,Dmax);
+
+Turbidity_NTU = mapVoltage( ...
+    V_Tu,Vmin,Vmax,TurbMin_NTU,TurbMax_NTU);
+
+%% ========================================================================
+% 7. TURBIDITY -> SSC
+% ========================================================================
+
+SSC_mgL = ...
+    SSC_per_NTU .* Turbidity_NTU + SSC_offset_mgL;
+
+SSC_mgL = max(SSC_mgL,0);
+
+%% ========================================================================
+% 8. MACKENZIE SOUND SPEED
+% ========================================================================
+
+SoundSpeed_mps = zeros(N,1);
+
+for i = 1:N
+
+    SoundSpeed_mps(i) = ...
+        Mackenzie_SoundSpeed( ...
+        T_C(i), ...
+        S_ppt(i), ...
+        Depth_m(i));
+
+end
+
+%% ========================================================================
+% 9. CALCULATE WATER ABSORPTION FOR ALL FIVE MODES
+% ========================================================================
+
+numModes = numel(Fc_kHz);
+
+AlphaWater_dBkm = zeros(N,numModes);
+
+for i = 1:N
+
+    for m = 1:numModes
+
+        AlphaWater_dBkm(i,m) = ...
+            Francois_Garrison( ...
+            Fc_kHz(m), ...
+            T_C(i), ...
+            S_ppt(i), ...
+            Depth_m(i), ...
+            SoundSpeed_mps(i), ...
+            pH);
+
+    end
+
+end
+
+%% ========================================================================
+% 10. CALCULATE SEDIMENT ATTENUATION FOR ALL FIVE MODES
+% ========================================================================
+
+AlphaSediment_dBm = zeros(N,numModes);
+
+for i = 1:N
+
+    for m = 1:numModes
+
+        AlphaSediment_dBm(i,m) = ...
+            UrickSedimentAttenuation( ...
+            Fc_kHz(m)*1000, ...
+            SSC_mgL(i), ...
+            particle_radius_um, ...
+            sediment_density_kgm3, ...
+            water_density_kgm3, ...
+            T_C(i));
+
+    end
+
+end
+
+%% ========================================================================
+% 11. TOTAL PROPAGATION LOSS FOR ALL FIVE MODES
+% ========================================================================
+%
+% Water + suspended-sediment attenuation:
+%
+% alpha_total = alpha_water + alpha_sediment
+%
+% One-way transmission loss:
+%
+% TL_oneway =
+%       20log10(range) + alpha_total * range_km
+%
+% For active sonar:
+%
+% TL_two_way = propagation_hops * TL_oneway
+%
+% NOTE:
+% Depth is already physically included through Mackenzie/F&G and
+% sediment/acoustic conditions. We do NOT incorrectly use operating depth
+% as the source-target range.
+
+SpreadingLoss_oneway_dB = ...
+    20*log10(max(range_m,1));
+
+TotalTL_dB = zeros(N,numModes);
+
+for i = 1:N
+
+    for m = 1:numModes
+
+        AlphaSediment_dBkm = ...
+            AlphaSediment_dBm(i,m)*1000;
+
+        AlphaTotal_dBkm = ...
+            AlphaWater_dBkm(i,m) + ...
+            AlphaSediment_dBkm;
+
+        TL_oneway = ...
+            SpreadingLoss_oneway_dB + ...
+            AlphaTotal_dBkm*(range_m/1000);
+
+        TotalTL_dB(i,m) = ...
+            propagation_hops * TL_oneway;
+
+    end
+
+end
+
+%% ========================================================================
+% 12. DEFINE BASELINE LINK-BUDGET
+% ========================================================================
+%
+% Baseline environment:
+%       T = 20 C
+%       S = 35 ppt
+%       D = 15 m
+%       Turbidity = 100 NTU
+%
+% Baseline operating mode:
+%       C3 = 200 kHz
+%
+% The system will select the HIGHEST-frequency mode whose predicted total
+% propagation loss does not exceed this baseline C3 loss.
+%
+% This makes the mode-selection threshold explicit and reproducible.
+
+T_ref = 20;
+S_ref = 35;
+D_ref = 15;
+Turb_ref_NTU = 100;
+
+c_ref = ...
+    Mackenzie_SoundSpeed(T_ref,S_ref,D_ref);
+
+SSC_ref = ...
+    SSC_per_NTU*Turb_ref_NTU + SSC_offset_mgL;
+
+refModeIndex = 3;    % C3
+refFc = Fc_kHz(refModeIndex);
+
+alphaW_ref = ...
+    Francois_Garrison( ...
+    refFc, ...
+    T_ref, ...
+    S_ref, ...
+    D_ref, ...
+    c_ref, ...
+    pH);
+
+alphaS_ref_dBm = ...
+    UrickSedimentAttenuation( ...
+    refFc*1000, ...
+    SSC_ref, ...
+    particle_radius_um, ...
+    sediment_density_kgm3, ...
+    water_density_kgm3, ...
+    T_ref);
+
+alphaS_ref_dBkm = ...
+    alphaS_ref_dBm*1000;
+
+TL_ref_oneway = ...
+    SpreadingLoss_oneway_dB + ...
+    (alphaW_ref+alphaS_ref_dBkm)*(range_m/1000);
+
+BaselineLinkBudget_dB = ...
+    propagation_hops*TL_ref_oneway;
+
+%% ========================================================================
+% 13. MODE SELECTION
+% ========================================================================
+%
+% RULE:
+%
+% Select the HIGHEST frequency (C5 -> C4 -> C3 -> C2 -> C1) satisfying:
+%
+%       TotalTL <= BaselineLinkBudget
+%
+% Why highest?
+%   Higher frequency gives a higher operating frequency / larger available
+%   bandwidth in your predefined C1-C5 design, while still respecting the
+%   same propagation-loss budget.
+%
+% This replaces the previous arbitrary severity weights.
+
+SelectedModeIndex = zeros(N,1);
+
+for i = 1:N
+
+    feasible = ...
+        TotalTL_dB(i,:) <= BaselineLinkBudget_dB;
+
+    if any(feasible)
+
+        % Highest-frequency feasible mode
+        idx = find(feasible,1,'last');
+
+    else
+
+        % Environment is worse than the C1 baseline link budget.
+        idx = 1;
+
+    end
+
+    SelectedModeIndex(i) = idx;
+
+end
+
+SelectedMode = Mode(SelectedModeIndex);
+SelectedDescription = ModeDescription(SelectedModeIndex);
+SelectedFc_kHz = Fc_kHz(SelectedModeIndex);
+SelectedBandwidth_kHz = Bandwidth_kHz(SelectedModeIndex);
+SelectedPulse_ms = Pulse_ms(SelectedModeIndex);
+SelectedAmplitude = AmplitudeClass(SelectedModeIndex);
+
+SelectedWaterAlpha_dBkm = zeros(N,1);
+SelectedSedimentAlpha_dBkm = zeros(N,1);
+SelectedTL_dB = zeros(N,1);
+
+for i = 1:N
+
+    m = SelectedModeIndex(i);
+
+    SelectedWaterAlpha_dBkm(i) = ...
+        AlphaWater_dBkm(i,m);
+
+    SelectedSedimentAlpha_dBkm(i) = ...
+        AlphaSediment_dBm(i,m)*1000;
+
+    SelectedTL_dB(i) = ...
+        TotalTL_dB(i,m);
+
+end
+
+%% ========================================================================
+% 14. VALIDITY FLAGS
+% ========================================================================
+
+MackenzieValid = ...
+    T_C >= -2 & T_C <= 30 & ...
+    S_ppt >= 30 & S_ppt <= 40 & ...
+    Depth_m >= 0 & Depth_m <= 8000;
+
+% NPL reports the main F&G reliability range as:
+% 10-500 kHz, -2<T<22 C, 30<S<35 ppt, 0<D<3.5 km.
+FG_MainRangeOK = ...
+    SelectedFc_kHz >= 10 & SelectedFc_kHz <= 500 & ...
+    T_C > -2 & T_C < 22 & ...
+    S_ppt > 30 & S_ppt < 35 & ...
+    Depth_m > 0 & Depth_m < 3500;
+
+% The 2020 field study found about +15 dB/km excess absorption around
+% 333 kHz compared with existing equations under its tested conditions.
+% C4 at 350 kHz is therefore flagged rather than silently "corrected".
+HighFreqValidationFlag = SelectedFc_kHz >= 300;
+
+ValidityFlag = strings(N,1);
+
+for i = 1:N
+
+    if ~MackenzieValid(i)
+
+        ValidityFlag(i) = ...
+            "OUTSIDE MACKENZIE VALIDITY";
+
+    elseif HighFreqValidationFlag(i)
+
+        ValidityFlag(i) = ...
+            "VALIDATE HIGH-FREQUENCY ABSORPTION";
+
+    elseif ~FG_MainRangeOK(i)
+
+        ValidityFlag(i) = ...
+            "CHECK FRANCOIS-GARRISON VALIDITY";
+
+    else
+
+        ValidityFlag(i) = ...
+            "Within stated model ranges";
+
+    end
+
+end
+
+%% ========================================================================
+% 15. FINAL 4D SENSOR -> LUT RESULT TABLE
+% ========================================================================
+
+Results = table( ...
+    V_T, ...
+    T_C, ...
+    V_S, ...
+    S_ppt, ...
+    V_D, ...
+    Depth_m, ...
+    V_Tu, ...
+    Turbidity_NTU, ...
+    SSC_mgL, ...
+    SoundSpeed_mps, ...
+    SelectedMode, ...
+    SelectedDescription, ...
+    SelectedFc_kHz, ...
+    SelectedBandwidth_kHz, ...
+    SelectedPulse_ms, ...
+    SelectedAmplitude, ...
+    SelectedWaterAlpha_dBkm, ...
+    SelectedSedimentAlpha_dBkm, ...
+    SelectedTL_dB, ...
+    repmat(BaselineLinkBudget_dB,N,1), ...
+    ValidityFlag, ...
+    'VariableNames',{ ...
+    'V_Temperature', ...
+    'Temperature_C', ...
+    'V_Salinity', ...
+    'Salinity_ppt', ...
+    'V_Depth', ...
+    'Depth_m', ...
+    'V_Turbidity', ...
+    'Turbidity_NTU', ...
+    'SSC_mgL', ...
+    'Mackenzie_SoundSpeed_mps', ...
+    'SelectedMode', ...
+    'ModeDescription', ...
+    'CenterFrequency_kHz', ...
+    'Bandwidth_kHz', ...
+    'PulseDuration_ms', ...
+    'AmplitudeClass', ...
+    'WaterAbsorption_dB_per_km', ...
+    'SedimentAttenuation_dB_per_km', ...
+    'TotalTwoWayLoss_dB', ...
+    'BaselineC3LossBudget_dB', ...
+    'ValidityFlag'});
+
+%% ========================================================================
+% 16. FULL C1-C5 EVALUATION TABLE
+% ========================================================================
+%
+% This is the most important table for checking the LUT logic.
+% Every environment is evaluated at every candidate mode.
+
+ModeEvaluation = [];
+
+row = 0;
+
+for i = 1:N
+
+    for m = 1:numModes
+
+        row = row + 1;
+
+        AlphaSed_dBkm = ...
+            AlphaSediment_dBm(i,m)*1000;
+
+        ModeEvaluation.InputRow(row,1) = i;
+
+        ModeEvaluation.Mode(row,1) = Mode(m);
+
+        ModeEvaluation.CenterFrequency_kHz(row,1) = Fc_kHz(m);
+
+        ModeEvaluation.Bandwidth_kHz(row,1) = ...
+            Bandwidth_kHz(m);
+
+        ModeEvaluation.WaterAbsorption_dBkm(row,1) = ...
+            AlphaWater_dBkm(i,m);
+
+        ModeEvaluation.SedimentAttenuation_dBkm(row,1) = ...
+            AlphaSed_dBkm;
+
+        ModeEvaluation.TotalTwoWayLoss_dB(row,1) = ...
+            TotalTL_dB(i,m);
+
+        ModeEvaluation.BaselineBudget_dB(row,1) = ...
+            BaselineLinkBudget_dB;
+
+        ModeEvaluation.Feasible(row,1) = ...
+            TotalTL_dB(i,m) <= BaselineLinkBudget_dB;
+
+        ModeEvaluation.Selected(row,1) = ...
+            SelectedModeIndex(i) == m;
+
+    end
+
+end
+
+%% Convert mode-evaluation struct to table before display/export
+% writetable() requires a MATLAB table, not a struct.
+ModeEvaluation = struct2table(ModeEvaluation);
+
+%% ========================================================================
+% 17. DISPLAY RESULTS
+% ========================================================================
+
+disp(" ");
+disp("====================================================================");
+disp("SIH26058 - SOURCE-GROUNDED 4D ADAPTIVE SONAR LUT");
+disp("====================================================================");
+
+disp(" ");
+disp("C1-C5 MODE TABLE:");
+disp(ModeTable);
+
+disp(" ");
+disp("FINAL 4D SENSOR -> MODE TABLE:");
+disp(Results);
+
+disp(" ");
+disp("FULL MODE EVALUATION:");
+disp(ModeEvaluation);
+
+fprintf("\n");
+fprintf("Baseline C3 link budget = %.2f dB total path loss\n", ...
+    BaselineLinkBudget_dB);
+
+fprintf("Turbidity calibration used = %.4f mg/L per NTU (PROTOTYPE)\n", ...
+    SSC_per_NTU);
+
+fprintf("Representative particle radius = %.2f um (PROTOTYPE)\n", ...
+    particle_radius_um);
+
+%% ========================================================================
+% 18. SAVE
+% ========================================================================
+
+writetable( ...
+    Results, ...
+    'SIH26058_4D_LUT_Results.csv');
+
+writetable( ...
+    ModeEvaluation, ...
+    'SIH26058_C1_C5_Full_Evaluation.csv');
+
+save( ...
+    'SIH26058_4D_Adaptive_LUT.mat', ...
+    'Results', ...
+    'ModeEvaluation', ...
+    'ModeTable', ...
+    'sensorVoltage', ...
+    'T_C', ...
+    'S_ppt', ...
+    'Depth_m', ...
+    'Turbidity_NTU', ...
+    'SSC_mgL', ...
+    'SoundSpeed_mps', ...
+    'BaselineLinkBudget_dB');
+
+%% ========================================================================
+% LOCAL FUNCTIONS
+% ========================================================================
+
+function X = mapVoltage(V,Vmin,Vmax,Xmin,Xmax)
+
+    X = Xmin + ...
+        (V-Vmin)./(Vmax-Vmin) .* ...
+        (Xmax-Xmin);
+
+    X = min(max(X,Xmin),Xmax);
+
+end
+
+function c = Mackenzie_SoundSpeed(T,S,D)
+
+    % Mackenzie (1981) nine-term equation.
+
+    c = ...
+        1448.96 ...
+        + 4.591*T ...
+        - 5.304e-2*T.^2 ...
+        + 2.374e-4*T.^3 ...
+        + 1.340*(S-35) ...
+        + 1.630e-2*D ...
+        + 1.675e-7*D.^2 ...
+        - 1.025e-2*T.*(S-35) ...
+        - 7.139e-13*T.*D.^3;
+
+end
+
+function alpha = Francois_Garrison(f_kHz,T,S,D,c,pH)
+
+    % Francois-Garrison seawater absorption.
+    % Output: dB/km.
+
+    f = f_kHz;
+
+    % Boric acid
+    A1 = 8.86*10^(0.78*pH-5)/c;
+    P1 = 1;
+
+    f1 = ...
+        2.8*sqrt(S)* ...
+        10^(4-1245/(273.18+T));
+
+    BA = ...
+        A1*P1*f1*f.^2 ./ ...
+        (f.^2+f1^2);
+
+    % Magnesium sulfate
+    A2 = ...
+        21.44*S*(1+0.025*T)/c;
+
+    P2 = ...
+        1-1.37e-4*D + ...
+        6.2e-9*D.^2;
+
+    f2 = ...
+        8.17*10^(8-1990/(273.18+T)) ./ ...
+        (1+0.0018*(S-35));
+
+    MS = ...
+        A2*P2*f2*f.^2 ./ ...
+        (f.^2+f2^2);
+
+    % Pure water
+    P3 = ...
+        1-3.83e-5*D + ...
+        4.9e-10*D.^2;
+
+    if T <= 20
+
+        A3 = ...
+            4.937e-4 ...
+            -2.59e-5*T ...
+            +9.11e-7*T.^2 ...
+            -1.50e-8*T.^3;
+
+    else
+
+        A3 = ...
+            3.964e-4 ...
+            -1.146e-5*T ...
+            +1.45e-7*T.^2 ...
+            -6.5e-10*T.^3;
+
+    end
+
+    PW = A3*P3*f.^2;
+
+    alpha = BA+MS+PW;
+
+end
+
+function alpha_dBm = UrickSedimentAttenuation( ...
+    f_Hz, ...
+    SSC_mgL, ...
+    particle_radius_um, ...
+    sediment_density_kgm3, ...
+    water_density_kgm3, ...
+    T_C)
+
+    % Urick / USGS sediment attenuation form.
+    %
+    % Output: attenuation coefficient [dB/m].
+    %
+    % This implementation is intended for a prototype and is sensitive
+    % to particle size, density, viscosity, and SSC calibration.
+    %
+    % Units inside the original Urick-type expression are converted to cm.
+
+    if SSC_mgL <= 0
+
+        alpha_dBm = 0;
+        return;
+
+    end
+
+    % Convert particle radius to cm
+    a_cm = particle_radius_um * 1e-4;
+
+    % Sediment volumetric concentration
+    %
+    % mg/L -> kg/m^3 conversion:
+    % 1 mg/L = 0.001 kg/m^3
+    SSC_kgm3 = SSC_mgL * 0.001;
+
+    SSC_v = ...
+        SSC_kgm3 / sediment_density_kgm3;
+
+    % Specific gravity
+    gamma = ...
+        sediment_density_kgm3 / water_density_kgm3;
+
+    % Sound speed is approximated in the sediment attenuation model
+    % by the water sound speed because the sediment model is used only
+    % as an attenuation correction.
+    %
+    % Kinematic viscosity of water:
+    % prototype approximation in m^2/s, weakly temperature dependent.
+    nu_m2s = WaterKinematicViscosity(T_C);
+
+    % Convert m^2/s to stokes:
+    % 1 St = 1e-4 m^2/s
+    nu_St = nu_m2s / 1e-4;
+
+    omega = 2*pi*f_Hz;
+
+    % beta in 1/cm
+    beta = sqrt(omega/(2*nu_St));
+
+    % wave number in 1/cm
+    %
+    % Use representative seawater sound speed of ~1500 m/s for this
+    % internal unit conversion. The final temperature dependence enters
+    % mainly through viscosity; the model remains a prototype.
+    c_ms = 1500;
+
+    wavelength_cm = ...
+        (c_ms/f_Hz)*100;
+
+    k = 2*pi/wavelength_cm;
+
+    beta_a = beta*a_cm;
+
+    s = ...
+        (9/(4*beta_a)) * ...
+        (1 + 1/beta_a);
+
+    tau = ...
+        0.5 + ...
+        9/(4*beta_a);
+
+    viscousTerm = ...
+        k*(gamma-1)^2 * ...
+        s/(s^2+(gamma+tau)^2);
+
+    scatteringTerm = ...
+        k^4*a_cm^3 / ...
+        (5*(1+1.3*k^2*a_cm^2+0.24*k^4*a_cm^4));
+
+    % USGS expression returns dB/cm when multiplied by 4.34.
+    alpha_dBcm = ...
+        SSC_v * ...
+        (viscousTerm + scatteringTerm) * ...
+        4.34;
+
+    alpha_dBm = ...
+        alpha_dBcm*100;
+
+end
+
+function nu = WaterKinematicViscosity(T)
+
+    % Practical prototype fit for water kinematic viscosity.
+    %
+    % This is not part of the MacKenzie/F-G equations.
+    % Used only by the sediment attenuation prototype.
+
+    % Dynamic viscosity [mPa.s], approximate around seawater/freshwater.
+    mu_mPas = ...
+        1.792e-3 * ...
+        10.^(-0.0337*T + 0.00022*T.^2);
+
+    % Convert to Pa.s
+    mu_Pas = mu_mPas;
+
+    % Density approximately 1000 kg/m^3 for viscosity conversion.
+    rho = 1000;
+
+    nu = mu_Pas/rho;
+
+end
