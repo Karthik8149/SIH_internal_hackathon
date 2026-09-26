@@ -1,0 +1,712 @@
+%% SIH26058_FINAL_Adaptive_LFM_Comparison.m
+% Fixed-frequency LFM vs sensor/Mackenzie adaptive LFM
+%
+% IMPORTANT INTERPRETATION
+% - The adaptive controller keeps LFM bandwidth B constant and changes fc.
+% - Frequency selection is based on environmental data + a precomputed LUT.
+% - The default LUT uses acoustic propagation loss (spreading +
+%   Francois-Garrison absorption) and a common receiver-noise calibration.
+% - The reported "TX energy saving" is an estimated acoustic transmit
+%   energy required to reach the target received SNR. It is NOT measured
+%   electrical transmitter power.
+% - A real hardware LUT should additionally include measured transducer,
+%   driver and receiver frequency response. Without that information,
+%   propagation-only selection naturally tends toward the lowest feasible
+%   frequency because seawater absorption generally increases with frequency.
+%
+% SOURCES
+% [1] K. V. Mackenzie, "Nine-term equation for sound speed in the oceans",
+%     JASA 70(3), 807-812, 1981. DOI: 10.1121/1.386920.
+% [2] Francois & Garrison (1982) seawater absorption model; NOAA PMEL
+%     Technical Memorandum OAR PMEL-125, Appendix 2.
+% [3] MathWorks, Linear Frequency Modulated Pulse Waveforms.
+% [4] MathWorks, Underwater Acoustic Channels / Bellhop documentation.
+%
+% This script is self-contained and does not require the Underwater Acoustic
+% Channels add-on. The channel is an image-source shallow-water approximation
+% with frequency-dependent absorption and additive Gaussian noise. For
+% higher-fidelity propagation, replace the channel function with Bellhop.
+
+clear;
+clc;
+close all;
+rng(42);
+
+%% ========================================================================
+% 1. GLOBAL WAVEFORM / SYSTEM PARAMETERS
+% =========================================================================
+
+cfg.fs = 2e6;                    % Sample rate [Hz]
+cfg.Tp = 300e-6;                % LFM pulse duration [s]
+cfg.B = 50e3;                   % CONSTANT LFM bandwidth [Hz]
+cfg.baseline_fc = 200e3;       % Traditional fixed center frequency [Hz]
+cfg.candidate_fc = [75 100 125 150 175 200]*1e3; % Adaptive candidates [Hz]
+cfg.target_SNR_dB = 10;         % Required received SNR [dB]
+cfg.target_energy = 1;          % Normalized acoustic pulse energy
+cfg.pH = 8.1;                   % Representative seawater pH
+
+% Optional first-order Doppler. Keep OFF for the main comparison because
+% the purpose here is frequency adaptation, not Doppler robustness.
+cfg.enableDoppler = false;
+
+% Shallow-water image-source reflection coefficients.
+% These are engineering assumptions, NOT measured site parameters.
+cfg.surfaceReflection = -0.85;
+cfg.bottomReflection  = 0.60;
+
+% Plot one environment with the largest adaptive frequency shift.
+plotEnvMode = "largest_shift";
+
+%% ========================================================================
+% 2. ENVIRONMENT / SENSOR SCENARIOS
+% =========================================================================
+% T          = temperature [deg C]
+% S          = salinity [ppt]
+% D          = operating depth [m]
+% range      = source-receiver separation [m]
+% velocity   = relative radial velocity [m/s]
+% waterDepth = local water depth [m]
+% noise_dB   = receiver/ambient noise change relative to reference [dB]
+%
+% These are simulation scenarios, not field measurements.
+
+env(1) = struct( ...
+    'name','Reference Coastal', ...
+    'T',20, 'S',35, 'D',15, 'range',100, 'velocity',2, ...
+    'waterDepth',50, 'noise_dB',0);
+
+env(2) = struct( ...
+    'name','Shallow Warm', ...
+    'T',25, 'S',32, 'D',10, 'range',75, 'velocity',2.5, ...
+    'waterDepth',40, 'noise_dB',2);
+
+env(3) = struct( ...
+    'name','Thermocline Representative', ...
+    'T',15, 'S',35, 'D',50, 'range',200, 'velocity',3, ...
+    'waterDepth',150, 'noise_dB',1);
+
+env(4) = struct( ...
+    'name','Cold Deep', ...
+    'T',8, 'S',35, 'D',100, 'range',300, 'velocity',2, ...
+    'waterDepth',250, 'noise_dB',-2);
+
+env(5) = struct( ...
+    'name','Low Salinity', ...
+    'T',22, 'S',30, 'D',30, 'range',150, 'velocity',4, ...
+    'waterDepth',100, 'noise_dB',1);
+
+Nenv = numel(env);
+
+%% ========================================================================
+% 3. GENERATE / NORMALIZE TRADITIONAL LFM
+% =========================================================================
+
+x_base = Generate_LFM( ...
+    cfg.baseline_fc, cfg.B, cfg.Tp, cfg.fs);
+
+x_base = Normalize_Energy( ...
+    x_base, cfg.fs, cfg.target_energy);
+
+%% ========================================================================
+% 4. CALIBRATE ONE COMMON RECEIVER NOISE FLOOR
+% =========================================================================
+% Use the reference environment only to define an absolute normalized noise
+% floor. The same receiver-noise reference is then applied to every scenario.
+
+referenceNoiseSeed = 1001;
+ref_zero_noise = PracticalChannel( ...
+    x_base, cfg.baseline_fc, cfg.fs, env(1), 0, cfg.pH, ...
+    referenceNoiseSeed, cfg.surfaceReflection, cfg.bottomReflection, ...
+    cfg.enableDoppler);
+
+ref_signal_power = mean(ref_zero_noise.rx_noiseless.^2);
+reference_alpha = Francois_Garrison( ...
+    cfg.baseline_fc/1e3, env(1).T, env(1).S, env(1).D, ...
+    ref_zero_noise.sound_speed, cfg.pH);
+reference_TL_dB = 20*log10(max(env(1).range,1)) + ...
+                 reference_alpha*(env(1).range/1000);
+
+% Calibration constant links the simple LUT path-loss model to the
+% normalized simulated reference signal power.
+link_constant = ref_signal_power / 10^(-reference_TL_dB/10);
+noise_power_ref = ref_signal_power / 10^(cfg.target_SNR_dB/10);
+
+fprintf('\n============================================================\n');
+fprintf('REFERENCE NOISE / LINK CALIBRATION\n');
+fprintf('============================================================\n');
+fprintf('Reference sound speed      : %.2f m/s\n', ref_zero_noise.sound_speed);
+fprintf('Reference alpha @ 200 kHz  : %.2f dB/km\n', reference_alpha);
+fprintf('Reference direct-path TL    : %.2f dB\n', reference_TL_dB);
+fprintf('Reference signal power      : %.6e\n', ref_signal_power);
+fprintf('Common noise power         : %.6e\n', noise_power_ref);
+fprintf('============================================================\n');
+
+%% ========================================================================
+% 5. BUILD SENSOR/MACKENZIE/FREQUENCY LUT
+% =========================================================================
+% The embedded implementation can replace these grids with a larger offline
+% LUT generated from site-specific ocean data.
+
+lut.T_grid = 5:5:30;                     % deg C
+lut.S_grid = 30:2:40;                    % ppt
+lut.D_grid = [5 10 25 50 75 100 150 200 300]; % m
+lut.R_grid = [50 75 100 150 200 300];   % m
+lut.noise_grid = -4:2:4;                 % dB relative to reference
+
+lut.fc = zeros(numel(lut.T_grid), numel(lut.S_grid), ...
+    numel(lut.D_grid), numel(lut.R_grid), numel(lut.noise_grid));
+
+fprintf('\nBuilding adaptive frequency LUT...\n');
+
+for iT = 1:numel(lut.T_grid)
+    for iS = 1:numel(lut.S_grid)
+        for iD = 1:numel(lut.D_grid)
+            for iR = 1:numel(lut.R_grid)
+                T = lut.T_grid(iT);
+                S = lut.S_grid(iS);
+                D = lut.D_grid(iD);
+                R = lut.R_grid(iR);
+                c = Mackenzie_SoundSpeed(T,S,D);
+
+                alpha = zeros(size(cfg.candidate_fc));
+                TL = zeros(size(cfg.candidate_fc));
+                for k = 1:numel(cfg.candidate_fc)
+                    alpha(k) = Francois_Garrison( ...
+                        cfg.candidate_fc(k)/1e3,T,S,D,c,cfg.pH);
+                    TL(k) = 20*log10(max(R,1)) + alpha(k)*R/1000;
+                end
+
+                for iN = 1:numel(lut.noise_grid)
+                    scenarioNoise = noise_power_ref * ...
+                        10^(lut.noise_grid(iN)/10);
+                    predictedPower = link_constant * 10.^(-TL/10);
+                    predictedSNR = 10*log10( ...
+                        predictedPower/(scenarioNoise + eps));
+
+                    feasible = predictedSNR >= cfg.target_SNR_dB;
+                    if any(feasible)
+                        idx = find(feasible,1,'first');
+                    else
+                        [~,idx] = max(predictedSNR);
+                    end
+
+                    lut.fc(iT,iS,iD,iR,iN) = cfg.candidate_fc(idx);
+                end
+            end
+        end
+    end
+end
+
+%% ========================================================================
+% 6. RUNTIME SENSOR -> MACKENZIE -> LUT SELECTION
+% =========================================================================
+
+selection = struct();
+
+for e = 1:Nenv
+    T = env(e).T;
+    S = env(e).S;
+    D = env(e).D;
+    R = env(e).range;
+
+    c = Mackenzie_SoundSpeed(T,S,D);
+
+    predicted_TL = zeros(size(cfg.candidate_fc));
+    predicted_SNR = zeros(size(cfg.candidate_fc));
+    alpha_dBkm = zeros(size(cfg.candidate_fc));
+
+    scenarioNoise = noise_power_ref * 10^(env(e).noise_dB/10);
+
+    for k = 1:numel(cfg.candidate_fc)
+        fc = cfg.candidate_fc(k);
+        alpha_dBkm(k) = Francois_Garrison( ...
+            fc/1e3,T,S,D,c,cfg.pH);
+        predicted_TL(k) = 20*log10(max(R,1)) + ...
+            alpha_dBkm(k)*(R/1000);
+    end
+
+    predictedPower = link_constant * 10.^(-predicted_TL/10);
+    predicted_SNR = 10*log10(predictedPower/(scenarioNoise + eps));
+
+    % Runtime LUT lookup. The LUT is generated offline from the Mackenzie-
+    % based acoustic model, then indexed by the nearest sensor state.
+    fc_from_lut = LookupFrequencyLUT( ...
+        T,S,D,R,env(e).noise_dB,lut,cfg.candidate_fc);
+
+    % Direct analytical selection is retained as a safety/verification check.
+    feasible = predicted_SNR >= cfg.target_SNR_dB;
+    if any(feasible)
+        idx_direct = find(feasible,1,'first');
+    else
+        [~,idx_direct] = max(predicted_SNR);
+    end
+    fc_direct = cfg.candidate_fc(idx_direct);
+
+    % Use LUT result as the actual adaptive controller output.
+    fc_selected = fc_from_lut;
+    [~,idx_selected] = min(abs(cfg.candidate_fc - fc_selected));
+
+    selection(e).sound_speed = c;
+    selection(e).predicted_TL = predicted_TL;
+    selection(e).predicted_SNR = predicted_SNR;
+    selection(e).alpha_dBkm = alpha_dBkm;
+    selection(e).selected_fc = fc_selected;
+    selection(e).selected_B = cfg.B;
+    selection(e).selected_TL = predicted_TL(idx_selected);
+    selection(e).selected_predicted_SNR = predicted_SNR(idx_selected);
+    selection(e).target_met = feasible(idx_selected);
+    selection(e).direct_model_fc = fc_direct;
+end
+
+%% ========================================================================
+% 7. RUN BOTH SYSTEMS THROUGH THE SAME CHANNEL / NOISE CONDITIONS
+% =========================================================================
+
+results = struct();
+
+for e = 1:Nenv
+    fc_sol = selection(e).selected_fc;
+
+    x_sol = Generate_LFM( ...
+        fc_sol, cfg.B, cfg.Tp, cfg.fs);
+    x_sol = Normalize_Energy( ...
+        x_sol, cfg.fs, cfg.target_energy);
+
+    noise_power = noise_power_ref * 10^(env(e).noise_dB/10);
+    seed = 5000 + e;    % SAME seed for traditional and adaptive
+
+    ch_base = PracticalChannel( ...
+        x_base, cfg.baseline_fc, cfg.fs, env(e), noise_power, cfg.pH, ...
+        seed, cfg.surfaceReflection, cfg.bottomReflection, cfg.enableDoppler);
+
+    ch_sol = PracticalChannel( ...
+        x_sol, fc_sol, cfg.fs, env(e), noise_power, cfg.pH, ...
+        seed, cfg.surfaceReflection, cfg.bottomReflection, cfg.enableDoppler);
+
+    mb = CalculateMetrics(x_base, ch_base, cfg.fs, cfg.target_SNR_dB);
+    ms = CalculateMetrics(x_sol,  ch_sol,  cfg.fs, cfg.target_SNR_dB);
+
+    results(e).name = env(e).name;
+    results(e).c = selection(e).sound_speed;
+    results(e).baseline_fc = cfg.baseline_fc;
+    results(e).solution_fc = fc_sol;
+    results(e).base = mb;
+    results(e).sol = ms;
+    results(e).SNR_gain_dB = ms.SNR_dB - mb.SNR_dB;
+    results(e).RSS_gain_dB = ms.RSS_dB - mb.RSS_dB;
+    results(e).TL_reduction_dB = mb.Effective_TL_dB - ms.Effective_TL_dB;
+    results(e).energy_saving_pct = ...
+        100*(mb.Required_TX_Energy - ms.Required_TX_Energy) / ...
+        (mb.Required_TX_Energy + eps);
+end
+
+%% ========================================================================
+% 8. COMPARISON TABLE — 7 IMPORTANT METRICS
+% =========================================================================
+
+Environment = string({results.name})';
+Traditional_fc_kHz = repmat(cfg.baseline_fc/1e3,Nenv,1);
+Adaptive_fc_kHz = [results.solution_fc]'/1e3;
+
+Traditional_TL_dB = arrayfun(@(r)r.base.Effective_TL_dB,results)';
+Adaptive_TL_dB = arrayfun(@(r)r.sol.Effective_TL_dB,results)';
+
+Traditional_RSS_dB = arrayfun(@(r)r.base.RSS_dB,results)';
+Adaptive_RSS_dB = arrayfun(@(r)r.sol.RSS_dB,results)';
+
+Traditional_SNR_dB = arrayfun(@(r)r.base.SNR_dB,results)';
+Adaptive_SNR_dB = arrayfun(@(r)r.sol.SNR_dB,results)';
+
+Traditional_Required_TX_Energy = ...
+    arrayfun(@(r)r.base.Required_TX_Energy,results)';
+Adaptive_Required_TX_Energy = ...
+    arrayfun(@(r)r.sol.Required_TX_Energy,results)';
+
+Estimated_TX_Energy_Saving_pct = [results.energy_saving_pct]';
+
+Traditional_Correlation = arrayfun(@(r)r.base.Correlation,results)';
+Adaptive_Correlation = arrayfun(@(r)r.sol.Correlation,results)';
+
+comparison = table( ...
+    Environment, ...
+    Traditional_fc_kHz, Adaptive_fc_kHz, ...
+    Traditional_TL_dB, Adaptive_TL_dB, ...
+    Traditional_RSS_dB, Adaptive_RSS_dB, ...
+    Traditional_SNR_dB, Adaptive_SNR_dB, ...
+    Traditional_Required_TX_Energy, Adaptive_Required_TX_Energy, ...
+    Estimated_TX_Energy_Saving_pct, ...
+    Traditional_Correlation, Adaptive_Correlation);
+
+fprintf('\n============================================================\n');
+fprintf('FIXED LFM vs SENSOR/MACKENZIE ADAPTIVE LFM\n');
+fprintf('============================================================\n');
+disp(comparison);
+
+%% Common waveform metric
+example_c = selection(1).sound_speed;
+range_resolution_m = example_c/(2*cfg.B);
+fprintf('Common LFM bandwidth      : %.1f kHz\n',cfg.B/1e3);
+fprintf('Pulse duration            : %.1f us\n',cfg.Tp*1e6);
+fprintf('Approx. range resolution  : %.3f m (same B in both systems)\n', ...
+    range_resolution_m);
+
+mean_SNR_gain = mean([results.SNR_gain_dB]);
+mean_RSS_gain = mean([results.RSS_gain_dB]);
+mean_energy_saving = mean([results.energy_saving_pct]);
+mean_TL_reduction = mean([results.TL_reduction_dB]);
+
+fprintf('\nFINAL SUMMARY\n');
+fprintf('Mean SNR difference                     = %.2f dB\n',mean_SNR_gain);
+fprintf('Mean RSS difference                     = %.2f dB\n',mean_RSS_gain);
+fprintf('Mean estimated acoustic TX-energy saving= %.2f %%\n',mean_energy_saving);
+fprintf('Mean effective-TL reduction             = %.2f dB\n',mean_TL_reduction);
+
+%% ========================================================================
+% 9. SAVE NUMERIC RESULTS
+% =========================================================================
+
+writetable(comparison,'SIH26058_Final_Comparison.csv');
+save('SIH26058_Final_Results.mat', ...
+    'results','comparison','selection','env','lut','cfg', ...
+    'noise_power_ref','reference_TL_dB','reference_alpha');
+
+fprintf('\nSaved:\n');
+fprintf('  SIH26058_Final_Comparison.csv\n');
+fprintf('  SIH26058_Final_Results.mat\n');
+
+%% ========================================================================
+% 10. PLOT 1 — SELECTED CENTER FREQUENCY
+% =========================================================================
+
+figure('Color','w','Name','1 - Adaptive Center Frequency');
+x = 1:Nenv;
+w = 0.36;
+bar(x-w/2, Traditional_fc_kHz, w, 'FaceColor',[0.85 0.10 0.10]);
+hold on;
+bar(x+w/2, Adaptive_fc_kHz, w, 'FaceColor',[0.05 0.30 0.90]);
+grid on;
+xlabel('Environment');
+ylabel('Center frequency [kHz]');
+title('Fixed 200 kHz LFM vs Adaptive Center Frequency');
+set(gca,'XTick',x,'XTickLabel',Environment);
+legend('Traditional LFM','Adaptive LFM','Location','best');
+
+%% ========================================================================
+% 11. PLOT 2 — PREDICTED CHANNEL LOSS VS FREQUENCY
+% =========================================================================
+
+if plotEnvMode == "largest_shift"
+    [~,eplot] = max(abs([results.solution_fc]-cfg.baseline_fc));
+else
+    eplot = 1;
+end
+
+figure('Color','w','Name','2 - Predicted Channel Loss');
+plot(cfg.candidate_fc/1e3, selection(eplot).predicted_TL, ...
+    'k-','LineWidth',1.8);
+hold on;
+
+traditional_idx = find(cfg.candidate_fc == cfg.baseline_fc,1);
+plot(cfg.baseline_fc/1e3, selection(eplot).predicted_TL(traditional_idx), ...
+    'o','MarkerSize',10,'MarkerFaceColor',[0.85 0.10 0.10], ...
+    'MarkerEdgeColor','k');
+
+plot(selection(eplot).selected_fc/1e3, selection(eplot).selected_TL, ...
+    'o','MarkerSize',10,'MarkerFaceColor',[0.05 0.30 0.90], ...
+    'MarkerEdgeColor','k');
+
+grid on;
+xlabel('LFM center frequency [kHz]');
+ylabel('Predicted direct-path channel loss [dB]');
+title(['Frequency-selection model - ' env(eplot).name]);
+legend('Predicted channel loss','Traditional 200 kHz','Adaptive selection', ...
+    'Location','best');
+
+%% ========================================================================
+% 12. PLOT 3 — CONSTANT-BANDWIDTH SPECTRUM
+% =========================================================================
+
+x_sol_plot = Generate_LFM( ...
+    results(eplot).solution_fc, cfg.B, cfg.Tp, cfg.fs);
+x_sol_plot = Normalize_Energy(x_sol_plot,cfg.fs,cfg.target_energy);
+
+NFFT = 2^nextpow2(8*length(x_base));
+faxis = (0:NFFT/2-1)*cfg.fs/NFFT;
+
+Xb = abs(fft(x_base,NFFT));
+Xs = abs(fft(x_sol_plot,NFFT));
+Xb = Xb(1:NFFT/2);
+Xs = Xs(1:NFFT/2);
+
+Xb_dB = 20*log10(Xb/max(Xb)+1e-12);
+Xs_dB = 20*log10(Xs/max(Xs)+1e-12);
+
+figure('Color','w','Name','3 - LFM Spectrum');
+plot(faxis/1e3,Xb_dB,'Color',[0.85 0.10 0.10],'LineWidth',1.8);
+hold on;
+plot(faxis/1e3,Xs_dB,'Color',[0.05 0.30 0.90],'LineWidth',1.8);
+grid on;
+xlim([0 250]);
+ylim([-60 5]);
+xlabel('Frequency [kHz]');
+ylabel('Normalized magnitude [dB]');
+title(sprintf('Constant bandwidth = %.0f kHz',cfg.B/1e3));
+legend('Traditional LFM - fixed 200 kHz', ...
+    sprintf('Adaptive LFM - %.0f kHz',results(eplot).solution_fc/1e3), ...
+    'Location','best');
+
+%% ========================================================================
+% 13. PLOT 4 — RECEIVED SNR
+% =========================================================================
+
+figure('Color','w','Name','4 - Received SNR');
+bar(x-w/2,Traditional_SNR_dB,w,'FaceColor',[0.85 0.10 0.10]);
+hold on;
+bar(x+w/2,Adaptive_SNR_dB,w,'FaceColor',[0.05 0.30 0.90]);
+grid on;
+xlabel('Environment');
+ylabel('Received SNR [dB]');
+title(sprintf('Received SNR Comparison (Target = %.1f dB)',cfg.target_SNR_dB));
+set(gca,'XTick',x,'XTickLabel',Environment);
+legend('Traditional LFM','Adaptive LFM','Location','best');
+
+%% ========================================================================
+% 14. PLOT 5 — ESTIMATED TX ENERGY REQUIRED FOR TARGET SNR
+% =========================================================================
+
+figure('Color','w','Name','5 - Estimated TX Energy');
+bar(x-w/2,Traditional_Required_TX_Energy,w,'FaceColor',[0.85 0.10 0.10]);
+hold on;
+bar(x+w/2,Adaptive_Required_TX_Energy,w,'FaceColor',[0.05 0.30 0.90]);
+grid on;
+xlabel('Environment');
+ylabel('Estimated normalized acoustic TX energy');
+title(sprintf('Estimated TX Energy Required for %.1f dB SNR',cfg.target_SNR_dB));
+set(gca,'XTick',x,'XTickLabel',Environment);
+legend('Traditional LFM','Adaptive LFM','Location','best');
+
+%% ========================================================================
+% 15. FINAL CONSOLE NOTES
+% =========================================================================
+
+fprintf('\n============================================================\n');
+fprintf('MODEL NOTES\n');
+fprintf('============================================================\n');
+fprintf(['1) B is identical for both systems, so the idealized LFM\n' ...
+          '   range resolution remains approximately c/(2B).\n']);
+fprintf(['2) Adaptive fc is selected from the precomputed LUT using\n' ...
+          '   T, S, D, range and relative noise level.\n']);
+fprintf(['3) The channel uses spherical spreading + Francois-Garrison\n' ...
+          '   absorption + direct/surface/bottom image paths.\n']);
+fprintf(['4) TX-energy saving is an acoustic link-budget estimate,\n' ...
+          '   not a measured electrical power saving.\n']);
+fprintf(['5) For a hardware-final LUT, replace the propagation-only\n' ...
+          '   model with measured transducer/driver/receiver frequency\n' ...
+          '   response and measured ambient-noise spectra.\n']);
+fprintf('============================================================\n');
+
+%% ========================================================================
+% LOCAL FUNCTIONS
+% =========================================================================
+
+function x = Generate_LFM(fc,B,Tp,fs)
+    N = round(Tp*fs);
+    t = (0:N-1)/fs;
+    f0 = fc - B/2;
+    k = B/Tp;
+    phase = 2*pi*(f0*t + 0.5*k*t.^2);
+    x = cos(phase);
+
+    % Hann taper reduces spectral sidelobes. The same taper is used for
+    % traditional and adaptive waveforms, so the comparison is fair.
+    if N > 1
+        w = 0.5*(1-cos(2*pi*(0:N-1)/(N-1)));
+        x = x.*w;
+    end
+end
+
+function xout = Normalize_Energy(x,fs,targetE)
+    E = sum(x.^2)/fs;
+    xout = x*sqrt(targetE/(E+eps));
+end
+
+function c = Mackenzie_SoundSpeed(T,S,D)
+    % Mackenzie (1981) nine-term sound-speed equation.
+    c = 1448.96 ...
+        + 4.591*T ...
+        - 5.304e-2*T.^2 ...
+        + 2.374e-4*T.^3 ...
+        + 1.340*(S-35) ...
+        + 1.630e-2*D ...
+        + 1.675e-7*D.^2 ...
+        - 1.025e-2*T.*(S-35) ...
+        - 7.139e-13*T.*D.^3;
+end
+
+function alpha = Francois_Garrison(f_kHz,T,S,D,c,pH)
+    % Francois-Garrison seawater absorption, output dB/km.
+    f = f_kHz;
+
+    % Boric acid
+    A1 = 8.86*10^(0.78*pH-5)/c;
+    P1 = 1;
+    f1 = 2.8*sqrt(S)*10^(4-1245/(273.18+T));
+    BA = A1*P1*f1*f.^2./(f.^2+f1^2);
+
+    % Magnesium sulfate
+    A2 = 21.44*S*(1+0.025*T)/c;
+    P2 = 1-1.37e-4*D+6.2e-9*D^2;
+    f2 = 8.17*10^(8-1990/(273.18+T))/(1+0.0018*(S-35));
+    MS = A2*P2*f2*f.^2./(f.^2+f2^2);
+
+    % Pure water
+    P3 = 1-3.83e-5*D+4.9e-10*D^2;
+    if T <= 20
+        A3 = 4.937e-4 ...
+            -2.59e-5*T ...
+            +9.11e-7*T^2 ...
+            -1.50e-8*T^3;
+    else
+        A3 = 3.964e-4 ...
+            -1.146e-5*T ...
+            +1.45e-7*T^2 ...
+            -6.5e-10*T^3;
+    end
+    PW = A3*P3*f.^2;
+
+    alpha = BA + MS + PW;
+end
+
+function fc = LookupFrequencyLUT(T,S,D,R,noise_dB,lut,candidate_fc)
+    [~,iT] = min(abs(lut.T_grid-T));
+    [~,iS] = min(abs(lut.S_grid-S));
+    [~,iD] = min(abs(lut.D_grid-D));
+    [~,iR] = min(abs(lut.R_grid-R));
+    [~,iN] = min(abs(lut.noise_grid-noise_dB));
+
+    fc = lut.fc(iT,iS,iD,iR,iN);
+
+    % Safety: guarantee the lookup output belongs to the candidate set.
+    [~,idx] = min(abs(candidate_fc-fc));
+    fc = candidate_fc(idx);
+end
+
+function ch = PracticalChannel(tx,fc,fs,e,noisePower,pH,seed,Rsurf,Rbottom,enableDoppler)
+    N = length(tx);
+    t = (0:N-1)/fs;
+
+    T = e.T;
+    S = e.S;
+    D = e.D;
+    R = e.range;
+    v = e.velocity;
+    H = max(e.waterDepth,D+5);
+
+    c = Mackenzie_SoundSpeed(T,S,D);
+
+    % Optional first-order Doppler.
+    if enableDoppler
+        dopplerFactor = v/c;
+        tD = t*(1+dopplerFactor);
+        xD = interp1(t,tx,tD,'linear',0);
+        doppler_Hz = fc*v/c;
+    else
+        xD = tx;
+        doppler_Hz = 0;
+    end
+
+    % Frequency-domain absorption filter.
+    NFFT = 2^nextpow2(8*N);
+    X = fft(xD,NFFT);
+    fabs_Hz = (0:NFFT-1)*fs/NFFT;
+    fabs_kHz = abs(fabs_Hz)/1000;
+
+    fgrid = linspace(1,min(300,fs/2/1e3),2000);
+    alphaGrid = Francois_Garrison(fgrid,T,S,D,c,pH);
+    alphaInterp = interp1(fgrid,alphaGrid,fabs_kHz,'linear','extrap');
+
+    % Keep the model bounded where the absorption fit is not intended to be used.
+    valid = fabs_kHz >= 1 & fabs_kHz <= 300;
+    alpha_fc = Francois_Garrison(fc/1000,T,S,D,c,pH);
+    alphaInterp(~valid) = alpha_fc;
+
+    % Image-source path lengths: direct, one surface reflection, one bottom reflection.
+    L0 = R;
+    Ls = sqrt(R^2 + (2*D)^2);
+    Lb = sqrt(R^2 + (2*(H-D))^2);
+    pathLength = [L0 Ls Lb];
+    reflection = [1 Rsurf Rbottom];
+
+    maxDelay = ceil(max(pathLength)/c*fs);
+    y = zeros(1,N+maxDelay+1);
+
+    for p = 1:3
+        % Frequency-dependent absorption for this path.
+        Habs = 10.^(-(alphaInterp.*pathLength(p)/1000)/20);
+        xPath = real(ifft(X.*Habs));
+        xPath = xPath(1:N);
+
+        delaySamples = round(pathLength(p)/c*fs);
+        startIdx = delaySamples + 1;
+        stopIdx = startIdx + N - 1;
+
+        % Spherical pressure spreading: amplitude proportional to 1/range.
+        amp = reflection(p)/max(pathLength(p),1);
+
+        if stopIdx <= length(y)
+            y(startIdx:stopIdx) = y(startIdx:stopIdx) + amp*xPath;
+        end
+    end
+
+    yNoiseless = y;
+
+    rng(seed);
+    noise = sqrt(max(noisePower,0))*randn(size(yNoiseless));
+    rx = yNoiseless + noise;
+
+    ch.rx_signal = rx;
+    ch.rx_noiseless = yNoiseless;
+    ch.noise = noise;
+    ch.sound_speed = c;
+    ch.delay_s = L0/c;
+    ch.spreading_dB = 20*log10(max(L0,1));
+    ch.absorption_dB_per_km = alpha_fc;
+    ch.absorption_dB = alpha_fc*(L0/1000);
+    ch.path_loss_dB = ch.spreading_dB + ch.absorption_dB;
+    ch.doppler_Hz = doppler_Hz;
+end
+
+function m = CalculateMetrics(tx,ch,fs,targetSNR)
+    Etx = sum(tx.^2)/fs;
+    Erx = sum(ch.rx_noiseless.^2)/fs;
+    signalPower = mean(ch.rx_noiseless.^2);
+    noisePower = mean(ch.noise.^2);
+
+    m.RxEnergy = Erx;
+    m.RSS_dB = 10*log10(signalPower+eps);
+    m.SNR_dB = 10*log10(signalPower/(noisePower+eps));
+    m.Effective_TL_dB = 10*log10(Etx/(Erx+eps));
+    m.Required_TX_Energy = Etx * ...
+        (noisePower*10^(targetSNR/10))/(signalPower+eps);
+
+    % Correlation metric around the expected direct-path arrival.
+    startIdx = round(ch.delay_s*fs) + 1;
+    L = min(length(tx),length(ch.rx_noiseless)-startIdx+1);
+
+    if L > 10
+        rxSeg = ch.rx_noiseless(startIdx:startIdx+L-1);
+        refSeg = tx(1:L);
+
+        rxSeg = rxSeg/(sqrt(sum(rxSeg.^2))+eps);
+        refSeg = refSeg/(sqrt(sum(refSeg.^2))+eps);
+
+        C = corrcoef(refSeg,rxSeg);
+        if all(size(C)==[2 2])
+            m.Correlation = C(1,2);
+        else
+            m.Correlation = NaN;
+        end
+    else
+        m.Correlation = NaN;
+    end
+end
