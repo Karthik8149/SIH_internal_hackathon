@@ -1,0 +1,242 @@
+%% ================================================================
+%  BASELINE SONAR TRANSMITTER ANALYSIS
+%  Teledyne SeaBat F50 - Representative Simulation
+% ================================================================
+clear;
+clc;
+close all;
+
+%% ================================================================
+% 1. BASELINE SONAR PARAMETERS
+% ================================================================
+fc = 200e3;          % Center frequency [Hz]
+B  = 100e3;          % Assumed bandwidth [Hz]
+Tp = 300e-6;         % Pulse duration [s]
+A  = 1;              % Normalized amplitude
+fs = 2e6;            % Sampling frequency [Hz]
+R  = 1;              % Load resistance [Ohm]
+
+% LFM frequency limits
+f_start = fc - B/2;  % 150 kHz
+f_end   = fc + B/2;  % 250 kHz
+
+% Chirp rate
+k = B/Tp;
+
+% Time vector
+t = 0:1/fs:Tp-1/fs;
+N = length(t);
+
+fprintf('\n====================================================\n');
+fprintf('        BASELINE SONAR TRANSMITTER \n');
+fprintf('====================================================\n');
+fprintf('Center Frequency : %.1f kHz\n', fc/1e3);
+fprintf('Start Frequency  : %.1f kHz\n', f_start/1e3);
+fprintf('End Frequency    : %.1f kHz\n', f_end/1e3);
+fprintf('Bandwidth        : %.1f kHz\n', B/1e3);
+fprintf('Pulse Duration   : %.1f us\n', Tp*1e6);
+fprintf('Sampling Rate    : %.2f MHz\n', fs/1e6);
+fprintf('Samples/Pulse    : %d\n', N);
+fprintf('Chirp Rate       : %.3e Hz/s\n', k);
+fprintf('Time-Bandwidth   : %.2f\n', B*Tp);
+
+%% ================================================================
+% 2. GENERATE UNWINDOWED LFM CHIRP
+% ================================================================
+% Correct LFM phase calculation starting at f_start
+phase = 2*pi*(f_start*t + 0.5*k*t.^2);
+x_unwindowed = A*cos(phase);
+
+%% ================================================================
+% 3. APPLY HANN WINDOW
+% ================================================================
+w = hann(N)';
+x_windowed = x_unwindowed .* w;
+
+%% ================================================================
+% 4. TIME-DOMAIN COMPARISON
+% ================================================================
+figure('Name', 'Time Domain');
+plot(t*1e6, x_unwindowed, 'LineWidth', 1.1);
+hold on;
+plot(t*1e6, x_windowed, 'LineWidth', 1.5);
+xlabel('Time (\mus)');
+ylabel('Amplitude');
+title('Unwindowed vs Hann-Windowed LFM Pulse');
+legend('Unwindowed', 'Hann Windowed');
+grid on;
+xlim([0 Tp*1e6]);
+
+%% ================================================================
+% 5. ZOOMED TIME-DOMAIN WAVEFORM
+% ================================================================
+figure('Name', 'Zoomed Time Domain');
+zoom_samples = min(250, N);
+plot(t(1:zoom_samples)*1e6, x_unwindowed(1:zoom_samples), 'LineWidth', 1.2);
+hold on;
+plot(t(1:zoom_samples)*1e6, x_windowed(1:zoom_samples), 'LineWidth', 1.5);
+xlabel('Time (\mus)');
+ylabel('Amplitude');
+title('Initial Cycles of LFM Pulse');
+legend('Unwindowed', 'Hann Windowed');
+grid on;
+
+%% ================================================================
+% 6. INSTANTANEOUS FREQUENCY
+% ================================================================
+f_inst = f_start + k*t;
+figure('Name', 'Instantaneous Frequency');
+plot(t*1e6, f_inst/1e3, 'LineWidth', 1.5);
+xlabel('Time (\mus)');
+ylabel('Instantaneous Frequency (kHz)');
+title('LFM Instantaneous Frequency');
+grid on;
+ylim([f_start f_end]/1e3);
+
+%% ================================================================
+% 7. FFT PARAMETERS & DUAL-SCALED SPECTRUM ANALYSIS
+% ================================================================
+NFFT = 2^nextpow2(N * 4); % 4x zero-padding for smooth frequency interpolation
+f = (0:NFFT-1)*(fs/NFFT);
+f_positive = f(1:NFFT/2);
+
+% Window coherent processing gains
+cg_unwindowed = sum(ones(1, N));
+cg_windowed   = sum(w);
+
+X_unwindowed = fft(x_unwindowed, NFFT);
+X_windowed   = fft(x_windowed, NFFT);
+
+% Magnitude normalized by coherent gain for true amplitude comparison
+Mag_unwindowed = abs(X_unwindowed(1:NFFT/2)) / (cg_unwindowed/2);
+Mag_windowed   = abs(X_windowed(1:NFFT/2)) / (cg_windowed/2);
+
+Mag_unwindowed_dB = 20*log10(Mag_unwindowed + eps);
+Mag_windowed_dB   = 20*log10(Mag_windowed + eps);
+
+%% ================================================================
+% 8. SPECTRUM COMPARISON
+% ================================================================
+figure('Name', 'Spectrum Comparison');
+plot(f_positive/1e3, Mag_unwindowed_dB, 'LineWidth', 1.2);
+hold on;
+plot(f_positive/1e3, Mag_windowed_dB, 'LineWidth', 1.5);
+xlabel('Frequency (kHz)');
+ylabel('Magnitude (dB)');
+title('Spectrum: Unwindowed vs Hann-Windowed LFM');
+legend('Unwindowed', 'Hann Windowed');
+grid on;
+xlim([100 300]);
+
+%% ================================================================
+% 9. NORMALIZED SPECTRUM
+% ================================================================
+Mag_unwindowed_norm = Mag_unwindowed_dB - max(Mag_unwindowed_dB);
+Mag_windowed_norm   = Mag_windowed_dB - max(Mag_windowed_dB);
+
+figure('Name', 'Normalized Spectrum');
+plot(f_positive/1e3, Mag_unwindowed_norm, 'LineWidth', 1.2);
+hold on;
+plot(f_positive/1e3, Mag_windowed_norm, 'LineWidth', 1.5);
+xlabel('Frequency (kHz)');
+ylabel('Normalized Magnitude (dB)');
+title('Normalized Spectrum Comparison');
+legend('Unwindowed', 'Hann Windowed');
+grid on;
+xlim([100 300]);
+ylim([-80 5]);
+
+%% ================================================================
+% 10 & 11. SPECTROGRAMS
+% ================================================================
+figure('Name', 'Spectrograms');
+subplot(2,1,1);
+spectrogram(x_unwindowed, 128, 100, 1024, fs, 'yaxis');
+title('Spectrogram - Unwindowed LFM');
+
+subplot(2,1,2);
+spectrogram(x_windowed, 128, 100, 1024, fs, 'yaxis');
+title('Spectrogram - Hann-Windowed LFM');
+
+%% ================================================================
+% 12. BANDWIDTH ESTIMATION (-20 dB)
+% ================================================================
+threshold_dB = -20;
+idx_un  = Mag_unwindowed_norm >= threshold_dB;
+idx_win = Mag_windowed_norm >= threshold_dB;
+
+BW_unwindowed = max(f_positive(idx_un)) - min(f_positive(idx_un));
+BW_windowed   = max(f_positive(idx_win)) - min(f_positive(idx_win));
+
+%% ================================================================
+% 13. PULSE-DURATION MEASUREMENT
+% ================================================================
+env_unwindowed = abs(hilbert(x_unwindowed));
+env_windowed   = abs(hilbert(x_windowed));
+
+env_unwindowed = env_unwindowed / max(env_unwindowed);
+env_windowed   = env_windowed / max(env_windowed);
+
+duration_threshold = 0.01; % 1% (-40 dB) amplitude
+idx_duration_un  = find(env_unwindowed >= duration_threshold);
+idx_duration_win = find(env_windowed >= duration_threshold);
+
+measured_duration_un  = t(idx_duration_un(end)) - t(idx_duration_un(1));
+measured_duration_win = t(idx_duration_win(end)) - t(idx_duration_win(1));
+
+%% ================================================================
+% 14 - 16. ENERGY AND POWER METRICS
+% ================================================================
+P_unwindowed = (x_unwindowed.^2) / R;
+P_windowed   = (x_windowed.^2) / R;
+
+E_unwindowed = sum(P_unwindowed) / fs;
+E_windowed   = sum(P_windowed) / fs;
+
+PeakPower_unwindowed = max(P_unwindowed);
+PeakPower_windowed   = max(P_windowed);
+
+AvgPower_unwindowed = E_unwindowed / Tp;
+AvgPower_windowed   = E_windowed / Tp;
+
+%% ================================================================
+% 17. OUT-OF-BAND LEAKAGE ESTIMATION (WITH GUARD BAND)
+% ================================================================
+guard_band = B * 0.10; % 10% guard band to exclude mainlobe skirt
+passband_mask = (f_positive >= (f_start - guard_band)) & ...
+                (f_positive <= (f_end + guard_band));
+
+outside_un  = Mag_unwindowed_norm;
+outside_win = Mag_windowed_norm;
+
+outside_un(passband_mask)  = -Inf;
+outside_win(passband_mask) = -Inf;
+
+sidelobe_unwindowed = max(outside_un);
+sidelobe_windowed   = max(outside_win);
+
+%% ================================================================
+% 18 - 20. TRANSMISSION METRICS & COMPARISON TABLE
+% ================================================================
+TBP_unwindowed = B * Tp;
+TBP_windowed   = B * Tp;
+
+fprintf('\n====================================================\n');
+fprintf('              BASELINE COMPARISON\n');
+fprintf('====================================================\n');
+fprintf('%-28s %-15s %-15s\n', 'Metric', 'Unwindowed', 'Hann Windowed');
+fprintf('-----------------------------------------------------\n');
+fprintf('%-28s %-15.2f %-15.2f\n', 'Bandwidth -20dB (kHz)', BW_unwindowed/1e3, BW_windowed/1e3);
+fprintf('%-28s %-15.2f %-15.2f\n', 'Pulse Duration (us)', measured_duration_un*1e6, measured_duration_win*1e6);
+fprintf('%-28s %-15.6f %-15.6f\n', 'Energy (J)', E_unwindowed, E_windowed);
+fprintf('%-28s %-15.6f %-15.6f\n', 'Peak Power (W)', PeakPower_unwindowed, PeakPower_windowed);
+fprintf('%-28s %-15.6f %-15.6f\n', 'Average Power (W)', AvgPower_unwindowed, AvgPower_windowed);
+fprintf('%-28s %-15.2f %-15.2f\n', 'Leakage/Sidelobe (dB)', sidelobe_unwindowed, sidelobe_windowed);
+fprintf('%-28s %-15.2f %-15.2f\n', 'Time-Bandwidth Product', TBP_unwindowed, TBP_windowed);
+
+%% ================================================================
+% 21. RANGE RESOLUTION
+% ================================================================
+c_nominal = 1500; % m/s
+range_resolution = c_nominal / (2 * B);
+fprintf('\nTheoretical Range Resolution: %.2f cm (c = %.0f m/s)\n', range_resolution*100, c_nominal);
