@@ -1,5 +1,7 @@
 # OJAS
 
+#TEAM NAME: Krushn and the SONARsauruses
+
 ## Optimization-guided Joule-aware Adaptive Sonar
 
 **A Physics-Guided, Minimum-Energy Software-Defined Real-Time Sonar Transmitter Payload for Autonomous Underwater Vehicles (AUVs).**
