@@ -1,0 +1,776 @@
+%% ================================================================
+%  UNDERWATER ACOUSTIC CHANNEL MODEL
+%  Person 2 - MATLAB Reference Model
+%
+%  PURPOSE:
+%  Transmitted LFM waveform
+%          ↓
+%  Underwater acoustic channel
+%          ↓
+%  Received/degraded LFM waveform
+%          ↓
+%  Tx vs Rx comparison
+%
+%  PHYSICAL REFERENCES:
+%
+%  [1] NOAA GOSSPL / Mackenzie sound-speed approximation
+%      Barlow, J. (2019), NOAA Technical Memorandum.
+%
+%  [2] NOAA PMEL-125:
+%      Francois & Garrison (1982) seawater absorption model.
+%
+%  [3] NOAA Fisheries acoustic assessment:
+%      Frequency-dependent seawater absorption.
+%
+%  [4] NOAA Technical Memorandum:
+%      Spherical spreading loss = 20*log10(range).
+%
+%  [5] Teledyne Marine SeaBat F50:
+%      200 kHz operation, FM pulse length 300 us - 10 ms.
+%
+%  [6] Macaulay, Chu & Ona (2020):
+%      Field measurements of acoustic absorption, 38-360 kHz.
+%
+% ================================================================
+
+clear;
+clc;
+close all;
+
+rng(10);       % Reproducible noise
+
+%% ================================================================
+% 1. TRANSMITTER PARAMETERS
+% ================================================================
+
+% SeaBat F50 supports 200 kHz and FM pulses from 300 us to 10 ms.
+% Therefore 200 kHz / 300 us is used as the representative baseline.
+
+fc = 200e3;                 % Center frequency [Hz]
+B  = 100e3;                 % LFM bandwidth [Hz] - simulation parameter
+Tp = 300e-6;                % Pulse duration [s]
+A  = 1;                     % Normalized Tx amplitude
+
+fs = 2e6;                   % Sampling frequency [Hz]
+                             % Simulation choice: 10 samples/cycle at 200 kHz
+
+N = round(Tp*fs);
+
+t_tx = (0:N-1)/fs;
+
+f_start = fc - B/2;
+f_end   = fc + B/2;
+
+k = B/Tp;                   % Chirp rate [Hz/s]
+
+%% ================================================================
+% 2. GENERATE TRANSMITTED LFM
+% ================================================================
+
+phase = 2*pi*(f_start*t_tx + 0.5*k*t_tx.^2);
+
+x = A*cos(phase);
+
+% Hann window
+window = 0.5*(1-cos(2*pi*(0:N-1)/(N-1)));
+
+x = x .* window;
+
+
+%% ================================================================
+% 3. UNDERWATER ENVIRONMENT
+% ================================================================
+
+% These values correspond to the team's Person-2 benchmark
+% environment:
+%
+%   depth       = 15 m
+%   temperature = 20 C
+%   salinity    = 28 ppt
+%   turbidity   = 110 NTU
+%
+% IMPORTANT:
+% These are benchmark/scenario values from the team's C++ model.
+% They are NOT claimed to be measurements from a particular ocean site.
+
+depth_m       = 15;
+temp_c        = 20;
+salinity_ppt  = 28;
+
+% Turbidity is retained as an environmental input for your project,
+% but we DO NOT convert NTU to acoustic attenuation using an invented
+% universal coefficient. A reliable universal NTU -> dB/km relation
+% is not being assumed here.
+
+turbidity_ntu = 110;
+
+%% ================================================================
+% 4. TRANSMITTER / RECEIVER RANGE
+% ================================================================
+
+range_m = 100;
+
+% AUV relative radial velocity.
+%
+% THIS IS A SIMULATION PARAMETER, NOT A UNIVERSAL OCEAN VALUE.
+%
+% 5 m/s is used to create a visible but moderate Doppler effect.
+
+velocity_mps = 5;
+
+
+%% ================================================================
+% 5. MACKENZIE SOUND SPEED
+% ================================================================
+
+T = temp_c;
+S = salinity_ppt;
+D = depth_m;
+
+c = 1448.96 ...
+    + 4.591*T ...
+    - 5.304e-2*T^2 ...
+    + 2.374e-4*T^3 ...
+    + 1.340*(S-35) ...
+    + 1.630e-2*D ...
+    + 1.675e-7*D^2 ...
+    - 1.025e-2*T*(S-35) ...
+    - 7.139e-13*T*D^3;
+
+%% ================================================================
+% 6. PROPAGATION DELAY
+% ================================================================
+
+prop_delay = range_m/c;
+
+delay_samples = round(prop_delay*fs);
+
+%% ================================================================
+% 7. SPHERICAL SPREADING LOSS
+% ================================================================
+
+% NOAA acoustic propagation documentation:
+%
+% TL_spreading = 20 log10(r)
+
+geometric_loss_db = 20*log10(range_m);
+
+
+%% ================================================================
+% 8. FRANCOIS-GARRISON SEAWATER ABSORPTION
+% ================================================================
+%
+% Absorption is calculated as:
+%
+% alpha = alpha_BA + alpha_MgSO4 + alpha_PW
+%
+% Result: dB/km
+%
+% This is the physically-based frequency-dependent part
+% of the channel.
+
+pH = 8.1;
+
+f_khz = linspace(50,300,1000);
+
+alpha_fg = zeros(size(f_khz));
+
+for ii = 1:length(f_khz)
+
+    f = f_khz(ii);       % frequency in kHz
+
+    % ------------------------------------------------------------
+    % Boric acid contribution
+    % ------------------------------------------------------------
+
+    A1 = 8.86 * ...
+         (10^(0.78*pH - 5)) / c;
+
+    P1 = 1;
+
+    f1 = 2.8 * sqrt(S) * ...
+         10^(4 - 1245/(273.18 + T));
+
+    BA = A1 * P1 * f1 * f^2 / (f^2 + f1^2);
+
+
+    % ------------------------------------------------------------
+    % Magnesium sulfate contribution
+    % ------------------------------------------------------------
+
+    A2 = 21.44 * S * (1 + 0.025*T) / c;
+
+    P2 = 1 ...
+         - 1.37e-4*D ...
+         + 6.2e-9*D^2;
+
+    f2 = 8.17 * ...
+         10^(8 - 1990/(273.18 + T)) ...
+         / (1 + 0.0018*(S-35));
+
+    MS = A2 * P2 * f2 * f^2 / ...
+         (f^2 + f2^2);
+
+
+    % ------------------------------------------------------------
+    % Pure water contribution
+    % ------------------------------------------------------------
+
+    P3 = 1 ...
+         - 3.83e-5*D ...
+         + 4.9e-10*D^2;
+
+    if T <= 20
+
+        A3 = 4.937e-4 ...
+             - 2.59e-5*T ...
+             + 9.11e-7*T^2 ...
+             - 1.50e-8*T^3;
+
+    else
+
+        A3 = 3.964e-4 ...
+             - 1.146e-5*T ...
+             + 1.45e-7*T^2 ...
+             - 6.5e-10*T^3;
+
+    end
+
+    PW = A3 * P3 * f^2;
+
+
+    % Total absorption
+    alpha_fg(ii) = BA + MS + PW;
+
+end
+
+
+%% ================================================================
+% 9. ABSORPTION AT CENTER FREQUENCY
+% ================================================================
+
+alpha_fc = interp1(f_khz,...
+                   alpha_fg,...
+                   fc/1000,...
+                   'linear');
+
+absorption_loss_db = alpha_fc * (range_m/1000);
+
+total_path_loss_db = geometric_loss_db + absorption_loss_db;
+
+amplitude_factor = 10^(-total_path_loss_db/20);
+
+
+%% ================================================================
+% 10. DOPPLER
+% ================================================================
+
+% First-order Doppler approximation
+%
+% fd ≈ fc * v/c
+
+doppler_shift = fc * velocity_mps/c;
+
+doppler_factor = velocity_mps/c;
+
+% Time scaling produces frequency shift
+t_doppler = t_tx*(1 + doppler_factor);
+
+x_doppler = interp1(t_tx,...
+                    x,...
+                    t_doppler,...
+                    'linear',...
+                    0);
+
+
+%% ================================================================
+% 11. FREQUENCY-DEPENDENT ABSORPTION OF THE LFM
+% ================================================================
+%
+% Instead of inventing an arbitrary distortion filter, use the
+% physically calculated Francois-Garrison absorption as the
+% frequency-dependent channel response.
+%
+% The LFM occupies:
+%
+%       fc-B/2 --> fc+B/2
+%
+%       150 kHz --> 250 kHz
+%
+% Therefore different parts of the chirp experience different
+% absorption.
+
+NFFT_channel = 2^nextpow2(N*8);
+
+X_doppler = fft(x_doppler,NFFT_channel);
+
+f_fft = (0:NFFT_channel-1)*fs/NFFT_channel;
+
+% Positive frequency magnitude
+f_abs = abs(f_fft);
+
+% Interpolate absorption model across FFT frequencies
+alpha_interp = interp1(f_khz,...
+                       alpha_fg,...
+                       f_abs/1000,...
+                       'linear',...
+                       'extrap');
+
+% Only use physical absorption in useful sonar region.
+% Outside 50-300 kHz, do not create an artificial extreme filter.
+
+valid_band = (f_abs >= 50e3) & (f_abs <= 300e3);
+
+alpha_interp(~valid_band) = alpha_fc;
+
+% Propagation attenuation due to absorption
+absorption_factor = ...
+    10.^(-(alpha_interp*(range_m/1000))/20);
+
+% Apply frequency-dependent attenuation
+X_channel = X_doppler .* absorption_factor;
+
+x_frequency_distorted = real(ifft(X_channel,...
+                                  NFFT_channel));
+
+x_frequency_distorted = ...
+    x_frequency_distorted(1:N);
+
+
+%% ================================================================
+% 12. MODERATE MULTIPATH
+% ================================================================
+%
+% Multipath parameters are explicitly simulation assumptions.
+%
+% They are NOT presented as measured values from a particular site.
+%
+% Main path + three weaker echoes.
+
+multipath_delay_us = [0 8 18 30];
+
+multipath_gain = [1.0 0.20 0.10 0.05];
+
+% Additional buffer
+rx_length = delay_samples + N + ...
+            round(40e-6*fs);
+
+y_multipath = zeros(1,rx_length);
+
+for p = 1:length(multipath_gain)
+
+    path_delay = ...
+        round(multipath_delay_us(p)*1e-6*fs);
+
+    start_index = delay_samples + path_delay + 1;
+
+    end_index = start_index + N - 1;
+
+    if end_index <= rx_length
+
+        y_multipath(start_index:end_index) = ...
+            y_multipath(start_index:end_index) ...
+            + multipath_gain(p)*x_frequency_distorted;
+
+    end
+
+end
+
+
+%% ================================================================
+% 13. APPLY OVERALL PROPAGATION LOSS
+% ================================================================
+
+y_attenuated = ...
+    y_multipath * 10^(-geometric_loss_db/20);
+
+
+%% ================================================================
+% 14. CONTROLLED RECEIVER NOISE
+% ================================================================
+%
+% Instead of choosing an arbitrary absolute noise amplitude,
+% define receiver SNR relative to the received signal.
+%
+% 10 dB SNR:
+%   Signal remains visible
+%   Noise is clearly noticeable
+%   Useful for demonstrating degradation
+
+target_SNR_dB = 10;
+
+signal_power = mean(y_attenuated.^2);
+
+noise_power = ...
+    signal_power / 10^(target_SNR_dB/10);
+
+noise = sqrt(noise_power)*randn(size(y_attenuated));
+
+y_received = y_attenuated + noise;
+
+
+%% ================================================================
+% 15. RECEIVED TIME VECTOR
+% ================================================================
+
+t_rx = (0:length(y_received)-1)/fs;
+
+
+%% ================================================================
+% 16. DISPLAY CHANNEL PARAMETERS
+% ================================================================
+
+fprintf('\n');
+fprintf('============================================================\n');
+fprintf('       UNDERWATER ACOUSTIC CHANNEL SIMULATION\n');
+fprintf('============================================================\n');
+
+fprintf('\nTRANSMITTER\n');
+fprintf('Center frequency       : %.1f kHz\n',fc/1e3);
+fprintf('Bandwidth              : %.1f kHz\n',B/1e3);
+fprintf('Pulse duration         : %.3f ms\n',Tp*1e3);
+fprintf('Sampling frequency     : %.1f MHz\n',fs/1e6);
+
+fprintf('\nENVIRONMENT\n');
+fprintf('Depth                  : %.1f m\n',depth_m);
+fprintf('Temperature            : %.1f C\n',temp_c);
+fprintf('Salinity               : %.1f ppt\n',salinity_ppt);
+fprintf('Turbidity              : %.1f NTU\n',turbidity_ntu);
+
+fprintf('\nPROPAGATION\n');
+fprintf('Range                  : %.1f m\n',range_m);
+fprintf('Sound speed            : %.2f m/s\n',c);
+fprintf('Propagation delay      : %.3f ms\n',prop_delay*1e3);
+fprintf('Delay samples          : %d\n',delay_samples);
+
+fprintf('\nTRANSMISSION LOSS\n');
+fprintf('Spherical spreading    : %.2f dB\n',geometric_loss_db);
+fprintf('Absorption coefficient : %.2f dB/km\n',alpha_fc);
+fprintf('Absorption loss        : %.2f dB\n',absorption_loss_db);
+fprintf('Total path loss        : %.2f dB\n',total_path_loss_db);
+fprintf('Amplitude factor       : %.6f\n',amplitude_factor);
+
+fprintf('\nDOPPLER\n');
+fprintf('Relative velocity      : %.2f m/s\n',velocity_mps);
+fprintf('Doppler shift          : %.2f Hz\n',doppler_shift);
+
+fprintf('\nRECEIVER\n');
+fprintf('Target receiver SNR    : %.1f dB\n',target_SNR_dB);
+fprintf('Multipath components   : %d\n',length(multipath_gain));
+
+fprintf('============================================================\n');
+
+
+%% ================================================================
+% 17. TRANSMITTED VS RECEIVED - TIME DOMAIN
+% ================================================================
+
+figure;
+
+subplot(2,1,1);
+
+plot(t_tx*1e3,x,...
+     'LineWidth',1.2);
+
+grid on;
+
+xlabel('Time [ms]');
+ylabel('Amplitude');
+
+title('TRANSMITTED LFM SIGNAL');
+
+xlim([0 Tp*1e3]);
+
+
+subplot(2,1,2);
+
+plot(t_rx*1e3,...
+     y_received,...
+     'LineWidth',0.8);
+
+grid on;
+
+xlabel('Time [ms]');
+ylabel('Amplitude');
+
+title('RECEIVED SIGNAL AFTER UNDERWATER CHANNEL');
+
+% Show region around received pulse
+xlim([(prop_delay-0.2e-3)*1e3,...
+      (prop_delay+Tp+0.3e-3)*1e3]);
+
+
+%% ================================================================
+% 18. OVERLAID NORMALIZED COMPARISON
+% ================================================================
+
+% Extract approximate received-pulse region
+
+rx_start = delay_samples + 1;
+
+rx_end = min(rx_start + N - 1,...
+             length(y_received));
+
+rx_pulse = y_received(rx_start:rx_end);
+
+t_rx_pulse = ...
+    (0:length(rx_pulse)-1)/fs;
+
+% Normalize ONLY for shape comparison
+% This allows us to see distortion independently of path loss.
+
+rx_pulse_norm = ...
+    rx_pulse / max(abs(rx_pulse));
+
+tx_norm = ...
+    x / max(abs(x));
+
+figure;
+
+plot(t_tx*1e3,...
+     tx_norm,...
+     'LineWidth',1.2);
+
+hold on;
+
+plot(t_rx_pulse*1e3,...
+     rx_pulse_norm,...
+     'LineWidth',1);
+
+grid on;
+
+xlabel('Time [ms]');
+ylabel('Normalized amplitude');
+
+title('NORMALIZED TRANSMITTED vs RECEIVED LFM');
+
+legend('Transmitted','Received');
+
+
+%% ================================================================
+% 19. TRANSMITTED SPECTRUM
+% ================================================================
+
+NFFT = 2^nextpow2(N*8);
+
+X_tx = fft(x,NFFT);
+
+f = (0:NFFT/2-1)*fs/NFFT;
+
+Mag_tx = abs(X_tx(1:NFFT/2));
+
+Mag_tx = Mag_tx/max(Mag_tx);
+
+Mag_tx_dB = ...
+    20*log10(Mag_tx + 1e-12);
+
+
+%% ================================================================
+% 20. RECEIVED SPECTRUM
+% ================================================================
+
+X_rx = fft(y_received,NFFT);
+
+Mag_rx = abs(X_rx(1:NFFT/2));
+
+% IMPORTANT:
+% Normalize received spectrum to TRANSMITTED peak,
+% not to its own peak.
+%
+% Therefore the actual attenuation remains visible.
+
+reference = max(abs(X_tx));
+
+Mag_rx_dB = ...
+    20*log10(Mag_rx/reference + 1e-12);
+
+
+%% ================================================================
+% 21. TRANSMITTED VS RECEIVED SPECTRUM
+% ================================================================
+
+figure;
+
+plot(f/1e3,...
+     Mag_tx_dB,...
+     'LineWidth',1.3);
+
+hold on;
+
+plot(f/1e3,...
+     Mag_rx_dB,...
+     'LineWidth',1);
+
+grid on;
+
+xlabel('Frequency [kHz]');
+ylabel('Magnitude [dB re Tx peak]');
+
+title('TRANSMITTED vs RECEIVED SPECTRUM');
+
+legend('Transmitted','Received');
+
+xlim([50 300]);
+
+ylim([-100 5]);
+
+
+%% ================================================================
+% 22. ABSORPTION COEFFICIENT VS FREQUENCY
+% ================================================================
+
+figure;
+
+plot(f_khz,...
+     alpha_fg,...
+     'LineWidth',1.5);
+
+grid on;
+
+xlabel('Frequency [kHz]');
+ylabel('Absorption coefficient [dB/km]');
+
+title('FRANCOIS-GARRISON SEAWATER ABSORPTION');
+
+xline(fc/1e3,...
+      '--',...
+      'Center frequency');
+
+xline(f_start/1e3,...
+      ':',...
+      'LFM start');
+
+xline(f_end/1e3,...
+      ':',...
+      'LFM end');
+
+
+%% ================================================================
+% 23. TRANSMITTED SPECTROGRAM
+% ================================================================
+
+figure;
+
+spectrogram(x,...
+            128,...
+            100,...
+            512,...
+            fs,...
+            'yaxis');
+
+title('TRANSMITTED LFM SPECTROGRAM');
+
+ylim([0 0.4]);
+
+
+%% ================================================================
+% 24. RECEIVED SPECTROGRAM
+% ================================================================
+
+% Zoom into received pulse instead of plotting the entire
+% 66 ms propagation delay.
+
+spectrogram(rx_pulse,...
+            128,...
+            100,...
+            512,...
+            fs,...
+            'yaxis');
+
+title('RECEIVED LFM SPECTROGRAM');
+
+ylim([0 0.4]);
+
+
+%% ================================================================
+% 25. CROSS-CORRELATION / DELAY ESTIMATION
+% ================================================================
+
+[corr_out,lags] = ...
+    xcorr(y_received,x);
+
+[~,idx] = ...
+    max(abs(corr_out));
+
+estimated_delay_samples = ...
+    lags(idx);
+
+estimated_delay = ...
+    estimated_delay_samples/fs;
+
+
+%% ================================================================
+% 26. CORRELATION RESULT
+% ================================================================
+
+figure;
+
+plot(lags/fs*1e3,...
+     abs(corr_out)/max(abs(corr_out)),...
+     'LineWidth',1.2);
+
+grid on;
+
+xlabel('Relative delay [ms]');
+ylabel('Normalized correlation');
+
+title('TX-RX CROSS-CORRELATION');
+
+xlim([(prop_delay-1e-3)*1e3,...
+      (prop_delay+1e-3)*1e3]);
+
+
+%% ================================================================
+% 27. POWER COMPARISON
+% ================================================================
+
+P_tx = mean(x.^2);
+
+P_rx = mean(y_received.^2);
+
+received_signal_power = ...
+    mean(y_attenuated.^2);
+
+measured_SNR = ...
+    10*log10(received_signal_power / noise_power);
+
+
+%% ================================================================
+% 28. FINAL RESULTS
+% ================================================================
+
+fprintf('\n');
+fprintf('============================================================\n');
+fprintf('                 RECEIVED SIGNAL ANALYSIS\n');
+fprintf('============================================================\n');
+
+fprintf('Theoretical delay     : %.3f ms\n',...
+        prop_delay*1e3);
+
+fprintf('Estimated delay       : %.3f ms\n',...
+        estimated_delay*1e3);
+
+fprintf('Delay error           : %.3f us\n',...
+        (estimated_delay-prop_delay)*1e6);
+
+fprintf('\n');
+
+fprintf('Doppler shift         : %.2f Hz\n',...
+        doppler_shift);
+
+fprintf('Path loss             : %.2f dB\n',...
+        total_path_loss_db);
+
+fprintf('Tx normalized power   : %.6e\n',...
+        P_tx);
+
+fprintf('Rx normalized power   : %.6e\n',...
+        P_rx);
+
+fprintf('Received signal power : %.6e\n',...
+        received_signal_power);
+
+fprintf('Measured SNR          : %.2f dB\n',...
+        measured_SNR);
+
+fprintf('============================================================\n');
