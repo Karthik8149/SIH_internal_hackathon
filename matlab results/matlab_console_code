@@ -1,0 +1,55 @@
+====================================================================
+SIH26058 - SOURCE-GROUNDED 4D ADAPTIVE SONAR LUT
+====================================================================
+ 
+C1-C5 MODE TABLE:
+    Mode         ModeDescription         Fc_kHz    Bandwidth_kHz    Pulse_ms    AmplitudeClass
+    ____    _________________________    ______    _____________    ________    ______________
+
+    "C1"    "Deep / Highly Turbid"         50            10             5         "High"      
+    "C2"    "Moderate"                    100            20             4         "Med-High"  
+    "C3"    "Baseline"                    200            40             2         "Medium"    
+    "C4"    "Shallow / Clear"             350            70             1         "Low"       
+    "C5"    "Surface / Crystal Clear"     500           100           0.5         "Minimum"   
+
+ 
+FINAL 4D SENSOR -> MODE TABLE:
+    V_Temperature    Temperature_C    V_Salinity    Salinity_ppt    V_Depth    Depth_m    V_Turbidity    Turbidity_NTU    SSC_mgL    Mackenzie_SoundSpeed_mps    SelectedMode       ModeDescription        CenterFrequency_kHz    Bandwidth_kHz    PulseDuration_ms    AmplitudeClass    WaterAbsorption_dB_per_km    SedimentAttenuation_dB_per_km    TotalTwoWayLoss_dB    BaselineC3LossBudget_dB               ValidityFlag           
+    _____________    _____________    __________    ____________    _______    _______    ___________    _____________    _______    ________________________    ____________    ______________________    ___________________    _____________    ________________    ______________    _________________________    _____________________________    __________________    _______________________    __________________________________
+
+         0.5              1.2            2.5              35          4.8       7680          4.9             980           980               1589.1                 "C1"        "Deep / Highly Turbid"             50                 10                 5              "High"                    5.201                          52.497                      91.54                  96.953             "CHECK FRANCOIS-GARRISON VALIDITY"
+         1.5              7.6            2.8            35.6          3.5       5600          3.5             700           700               1577.2                 "C2"        "Moderate"                        100                 20                 4              "Med-High"               14.822                           46.58                      92.28                  96.953             "CHECK FRANCOIS-GARRISON VALIDITY"
+         2.5               14            2.5              35          1.9       3040            2             400           400               1554.3                 "C3"        "Baseline"                        200                 40                 2              "Medium"                 43.055                          31.883                     94.988                  96.953             "CHECK FRANCOIS-GARRISON VALIDITY"
+         3.5             20.4            2.2            34.4          0.6        960          0.6             120           120               1537.7                 "C3"        "Baseline"                        200                 40                 2              "Medium"                 68.429                          7.9696                      95.28                  96.953             "Within stated model ranges"      
+         4.5             26.8              2              34         0.05         80         0.05              10            10               1538.7                 "C2"        "Moderate"                        100                 20                 4              "Med-High"                 35.4                         0.39192                     87.158                  96.953             "CHECK FRANCOIS-GARRISON VALIDITY"
+
+ 
+FULL MODE EVALUATION:
+    InputRow    Mode    CenterFrequency_kHz    Bandwidth_kHz    WaterAbsorption_dBkm    SedimentAttenuation_dBkm    TotalTwoWayLoss_dB    BaselineBudget_dB    Feasible    Selected
+    ________    ____    ___________________    _____________    ____________________    ________________________    __________________    _________________    ________    ________
+
+       1        "C1"             50                  10                 5.201                    52.497                    91.54               96.953           true        true   
+       1        "C2"            100                  20                9.7261                     79.78                   97.901               96.953           false       false  
+       1        "C3"            200                  40                20.809                    117.99                   107.76               96.953           false       false  
+       1        "C4"            350                  70                49.158                    159.89                   121.81               96.953           false       false  
+       1        "C5"            500                 100                92.677                    193.31                    137.2               96.953           false       false  
+       2        "C1"             50                  10                7.2973                    31.266                   87.713               96.953           true        false  
+       2        "C2"            100                  20                14.822                     46.58                    92.28               96.953           true        true   
+       2        "C3"            200                  40                26.476                    68.085                   98.912               96.953           false       false  
+       2        "C4"            350                  70                50.202                    91.703                   108.38               96.953           false       false  
+       2        "C5"            500                 100                85.505                    110.57                   119.21               96.953           false       false  
+       3        "C1"             50                  10                10.033                    14.947                   84.996               96.953           true        false  
+       3        "C2"            100                  20                24.153                    21.983                   89.227               96.953           true        false  
+       3        "C3"            200                  40                43.055                    31.883                   94.988               96.953           true        true   
+       3        "C4"            350                  70                67.444                     42.77                   102.04               96.953           false       false  
+       3        "C5"            500                 100                99.231                     51.47                   110.14               96.953           false       false  
+       4        "C1"             50                  10                11.855                    3.7882                   83.129               96.953           true        false  
+       4        "C2"            100                  20                33.418                    5.5239                   87.788               96.953           true        false  
+       4        "C3"            200                  40                68.429                    7.9696                    95.28               96.953           true        true   
+       4        "C4"            350                  70                101.71                    10.661                   102.47               96.953           false       false  
+       4        "C5"            500                 100                133.81                    12.812                   109.33               96.953           false       false  
+       5        "C1"             50                  10                11.384                   0.27037                   82.331               96.953           true        false  
+       5        "C2"            100                  20                  35.4                   0.39192                   87.158               96.953           true        true   
+       5        "C3"            200                  40                86.746                   0.56337                   97.462               96.953           false       false  
+       5        "C4"            350                  70                138.38                   0.75213                   107.83               96.953           false       false  
+       5        "C5"            500                 100                176.49                   0.90307                   115.48               96.953           false       false
