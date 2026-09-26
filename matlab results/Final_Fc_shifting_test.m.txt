@@ -1,0 +1,395 @@
+%% SIH26058 - Adaptive LFM Waveform Visualizer
+% Arduino -> MATLAB
+%
+% Frequency axis is FIXED from 0 to 550 kHz.
+% Center frequency changes; bandwidth remains CONSTANT at 50 kHz.
+%
+% IMPORTANT:
+% This version does NOT use patch(), so it avoids the patch error.
+
+clear;
+clc;
+close all;
+
+%% ====================== USER SETTING ===============================
+% CHANGE THIS IF YOUR ARDUINO IS ON A DIFFERENT COM PORT
+port = "COM3";
+baud = 115200;
+
+%% ====================== SERIAL CONNECTION ==========================
+try
+    s = serialport(port, baud);
+    configureTerminator(s, "LF");
+    flush(s);
+catch ME
+    error(['Could not open %s.\n' ...
+           'Check Arduino Tools > Port, close Arduino Serial Monitor, ' ...
+           'and make sure the Arduino is connected.\n\nMATLAB error: %s'], ...
+           port, ME.message);
+end
+
+pause(2);
+
+%% ====================== LFM SETTINGS ===============================
+Fs = 2e6;                 % 2 MHz visualization sampling rate
+Tchirp = 1e-3;            % 1 ms LFM visualization
+N = round(Fs*Tchirp);
+t = (0:N-1)/Fs;
+
+% Initial values
+Tenv = 20;
+Depth = 15;
+fc_kHz = 200;
+BW_kHz = 50;
+Mode = "C3";
+
+%% ====================== MODE REFERENCE DATA ========================
+% Constant bandwidth = 50 kHz
+modeNames = ["C1","C2","C3","C4","C5"];
+modeFc = [50 100 200 350 500];
+
+bandLow  = modeFc - 25;
+bandHigh = modeFc + 25;
+
+%% ====================== FIGURE ===============================
+fig = figure( ...
+    'Name','SIH26058 Adaptive LFM Demonstration', ...
+    'NumberTitle','off', ...
+    'Color','w', ...
+    'Position',[100 80 1200 780]);
+
+tl = tiledlayout(fig,2,1, ...
+    'TileSpacing','compact', ...
+    'Padding','compact');
+
+%% ====================== TIME DOMAIN ================================
+ax1 = nexttile(tl);
+
+x = zeros(1,N);
+
+hTime = plot(ax1, t*1e3, x, 'LineWidth', 1.1);
+
+grid(ax1,'on');
+box(ax1,'on');
+
+xlabel(ax1,'Time (ms)');
+ylabel(ax1,'Amplitude');
+
+title(ax1,'Adaptive LFM - Time Domain');
+
+xlim(ax1,[0 Tchirp*1e3]);
+ylim(ax1,[-1.1 1.1]);
+
+%% ====================== FREQUENCY DOMAIN ===========================
+ax2 = nexttile(tl);
+
+f = (0:floor(N/2))*Fs/N;
+
+hSpec = plot(ax2, f/1e3, zeros(size(f)), ...
+    'LineWidth',1.3);
+
+hold(ax2,'on');
+grid(ax2,'on');
+box(ax2,'on');
+
+xlabel(ax2,'Frequency (kHz)');
+ylabel(ax2,'Normalized Magnitude');
+
+title(ax2,'Adaptive LFM - Spectrum');
+
+% FIXED AXIS -- NEVER CHANGE THIS LATER
+xlim(ax2,[0 550]);
+ylim(ax2,[0 1.05]);
+
+%% ====================== REFERENCE BANDS ============================
+% We intentionally avoid patch().
+% Each C1-C5 band is represented by:
+%   1) two dashed boundary lines
+%   2) one center-frequency reference line
+%   3) a text label
+
+for k = 1:length(modeNames)
+
+    % Lower boundary
+    xline(ax2,bandLow(k),'--', ...
+        'Alpha',0.25, ...
+        'HandleVisibility','off');
+
+    % Upper boundary
+    xline(ax2,bandHigh(k),'--', ...
+        'Alpha',0.25, ...
+        'HandleVisibility','off');
+
+    % Center frequency
+    xline(ax2,modeFc(k),':', ...
+        'Alpha',0.25, ...
+        'HandleVisibility','off');
+
+    % Label
+    text(ax2, ...
+        modeFc(k), ...
+        0.95, ...
+        sprintf('%s\n%d kHz',modeNames(k),modeFc(k)), ...
+        'HorizontalAlignment','center', ...
+        'VerticalAlignment','top', ...
+        'FontWeight','bold', ...
+        'FontSize',9, ...
+        'Color',[0.25 0.25 0.25]);
+end
+
+%% ====================== ACTIVE BAND INDICATOR ======================
+% Active band is shown by thick lines at the band edges and center.
+activeLow  = fc_kHz - BW_kHz/2;
+activeHigh = fc_kHz + BW_kHz/2;
+
+hActiveLow = xline(ax2,activeLow,'-', ...
+    'LineWidth',2.5);
+
+hActiveHigh = xline(ax2,activeHigh,'-', ...
+    'LineWidth',2.5);
+
+hFcLine = xline(ax2,fc_kHz,'-', ...
+    'LineWidth',3);
+
+% Horizontal line visually connecting the active 50-kHz band
+activeY = 0.78;
+
+hActiveBand = plot(ax2, ...
+    [activeLow activeHigh], ...
+    [activeY activeY], ...
+    'LineWidth',5);
+
+% End markers for the active band
+hActiveLeftMarker = plot(ax2,activeLow,activeY,'o', ...
+    'MarkerSize',6, ...
+    'LineWidth',1.5);
+
+hActiveRightMarker = plot(ax2,activeHigh,activeY,'o', ...
+    'MarkerSize',6, ...
+    'LineWidth',1.5);
+
+%% ====================== STATUS TEXT ===============================
+hStatus = annotation(fig,'textbox', ...
+    [0.05 0.005 0.90 0.055], ...
+    'String','', ...
+    'EdgeColor','none', ...
+    'HorizontalAlignment','center', ...
+    'FontSize',11, ...
+    'FontWeight','bold');
+
+sgtitle(tl, ...
+    'SIH26058: Adaptive Center Frequency + CONSTANT 50 kHz Bandwidth', ...
+    'FontSize',14, ...
+    'FontWeight','bold');
+
+%% ====================== INITIAL WAVEFORM ===========================
+[x, freq, mag] = makeLFM(fc_kHz,BW_kHz,t,Fs,N,Tchirp);
+
+set(hTime,'YData',x);
+
+set(hSpec, ...
+    'XData',freq/1e3, ...
+    'YData',mag);
+
+updateActiveBand( ...
+    hActiveLow, ...
+    hActiveHigh, ...
+    hFcLine, ...
+    hActiveBand, ...
+    hActiveLeftMarker, ...
+    hActiveRightMarker, ...
+    fc_kHz, ...
+    BW_kHz, ...
+    activeY);
+
+updateStatus(hStatus,Tenv,Depth,Mode,fc_kHz,BW_kHz);
+
+drawnow;
+
+%% ====================== MAIN LOOP ================================
+disp(' ');
+disp('SIH26058 MATLAB visualizer is running.');
+disp('Move the two Arduino potentiometers.');
+disp('Frequency axis is FIXED at 0-550 kHz.');
+disp('Close the figure window to stop.');
+disp(' ');
+
+while isvalid(fig)
+
+    newestLine = "";
+
+    % Read the newest available valid Arduino message
+    while s.NumBytesAvailable > 0
+
+        line = strtrim(readline(s));
+
+        if startsWith(line,"DATA,")
+            newestLine = line;
+        end
+    end
+
+    %% -------------------- PARSE ARDUINO DATA -----------------------
+    if strlength(newestLine) > 0
+
+        parts = split(newestLine,",");
+
+        if numel(parts) == 6
+
+            newT     = str2double(parts(2));
+            newDepth = str2double(parts(3));
+            newFc    = str2double(parts(4));
+            newBW    = str2double(parts(5));
+            newMode  = string(parts(6));
+
+            if all(isfinite([newT,newDepth,newFc,newBW]))
+
+                Tenv   = newT;
+                Depth  = newDepth;
+                fc_kHz = newFc;
+                BW_kHz = newBW;
+                Mode   = newMode;
+
+                %% ------------------- GENERATE LFM -----------------
+                [x, freq, mag] = makeLFM( ...
+                    fc_kHz, ...
+                    BW_kHz, ...
+                    t, ...
+                    Fs, ...
+                    N, ...
+                    Tchirp);
+
+                %% -------------------- TIME PLOT -------------------
+                set(hTime,'YData',x);
+
+                %% -------------------- FFT PLOT --------------------
+                set(hSpec, ...
+                    'XData',freq/1e3, ...
+                    'YData',mag);
+
+                % IMPORTANT:
+                % No xlim() here.
+                % Frequency axis remains permanently 0-550 kHz.
+
+                %% ---------------- ACTIVE BAND ---------------------
+                updateActiveBand( ...
+                    hActiveLow, ...
+                    hActiveHigh, ...
+                    hFcLine, ...
+                    hActiveBand, ...
+                    hActiveLeftMarker, ...
+                    hActiveRightMarker, ...
+                    fc_kHz, ...
+                    BW_kHz, ...
+                    activeY);
+
+                %% ---------------- TITLES --------------------------
+                activeLow  = fc_kHz - BW_kHz/2;
+                activeHigh = fc_kHz + BW_kHz/2;
+
+                title(ax1,sprintf( ...
+                    'Adaptive LFM - Time Domain | fc = %.1f kHz | BW = %.1f kHz', ...
+                    fc_kHz,BW_kHz));
+
+                title(ax2,sprintf( ...
+                    'Spectrum | Active Mode = %s | Active Band = %.1f-%.1f kHz', ...
+                    Mode,activeLow,activeHigh));
+
+                updateStatus( ...
+                    hStatus, ...
+                    Tenv, ...
+                    Depth, ...
+                    Mode, ...
+                    fc_kHz, ...
+                    BW_kHz);
+
+                drawnow limitrate;
+            end
+        end
+    end
+
+    pause(0.05);
+end
+
+%% ====================== CLEANUP ===================================
+clear s;
+
+disp('MATLAB visualizer stopped.');
+
+%% ====================== LOCAL FUNCTION: LFM =======================
+function [x,freq,mag] = makeLFM(fc_kHz,BW_kHz,t,Fs,N,Tchirp)
+
+    fc = fc_kHz*1e3;
+    BW = BW_kHz*1e3;
+
+    % LFM start frequency
+    fStart = fc - BW/2;
+
+    % Chirp rate
+    chirpRate = BW/Tchirp;
+
+    % Phase
+    phase = 2*pi*( ...
+        fStart*t + ...
+        0.5*chirpRate*t.^2);
+
+    % Real LFM
+    x = sin(phase);
+
+    % Manual Hann window
+    window = 0.5 - 0.5*cos(2*pi*(0:N-1)/(N-1));
+
+    % FFT
+    X = fft(x .* window);
+    X = X(1:floor(N/2)+1);
+
+    freq = (0:floor(N/2))*Fs/N;
+
+    mag = abs(X);
+
+    if max(mag) > 0
+        mag = mag/max(mag);
+    end
+end
+
+%% ====================== LOCAL FUNCTION: ACTIVE BAND ==============
+function updateActiveBand( ...
+    hActiveLow, ...
+    hActiveHigh, ...
+    hFcLine, ...
+    hActiveBand, ...
+    hActiveLeftMarker, ...
+    hActiveRightMarker, ...
+    fc_kHz, ...
+    BW_kHz, ...
+    activeY)
+
+    activeLow  = fc_kHz - BW_kHz/2;
+    activeHigh = fc_kHz + BW_kHz/2;
+
+    set(hActiveLow,'Value',activeLow);
+    set(hActiveHigh,'Value',activeHigh);
+    set(hFcLine,'Value',fc_kHz);
+
+    set(hActiveBand, ...
+        'XData',[activeLow activeHigh], ...
+        'YData',[activeY activeY]);
+
+    set(hActiveLeftMarker, ...
+        'XData',activeLow, ...
+        'YData',activeY);
+
+    set(hActiveRightMarker, ...
+        'XData',activeHigh, ...
+        'YData',activeY);
+end
+
+%% ====================== LOCAL FUNCTION: STATUS ====================
+function updateStatus(hStatus,Tenv,Depth,Mode,fc_kHz,BW_kHz)
+
+    lowFreq  = fc_kHz - BW_kHz/2;
+    highFreq = fc_kHz + BW_kHz/2;
+
+    hStatus.String = sprintf( ...
+        'Temperature = %.2f ^oC   |   Depth = %.1f m   |   Mode = %s   |   fc = %.1f kHz   |   BW = %.1f kHz   |   Active band = %.1f-%.1f kHz', ...
+        Tenv,Depth,Mode,fc_kHz,BW_kHz,lowFreq,highFreq);
+end
